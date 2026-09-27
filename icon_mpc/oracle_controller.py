@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation
 from controller.controller_template import MultirotorControlTemplate
 from icon_mpc.nmpc import ParamNMPCSolver, get_param_nmpc, LAYOUT, nominal_params, vehicle_params, GRAV
 
-LEVELS = ['nominal', 'aero', 'kf', 'params', 'dist', 'future']  # levels >= 'params' are privileged
+LEVELS = ['nominal', 'aero', 'kf', 'learned', 'params', 'dist', 'future']  # levels >= 'params' are privileged
 
 
 def flat_to_state_ref(flat, mass, thrust_gain_sum):
@@ -105,11 +105,12 @@ class OracleNMPC(MultirotorControlTemplate):
         f_max = self.k_eta_ctrl * ctrl_params['rotor_speed_max'] ** 2
         self.mpc = get_param_nmpc(f_max, t_horizon, n_nodes)
         kf_kwargs = dict(kf_kwargs or {})
+        self.record = None  # set to [] to log (measured state, believed applied command) per step
         aero = bool(kf_kwargs.pop('aero', level != 'nominal'))
         # delay (s): known actuation latency -> KF uses the command actually applied and the NMPC
         # predicts the state forward over the delay; filt: feed KF-filtered v, w to the NMPC.
         self.delay_steps = int(round(kf_kwargs.pop('delay', 0.0) / sim_dt))
-        self.filt = bool(kf_kwargs.pop('filt', 0))
+        self.filt = int(kf_kwargs.pop('filt', 0))
         self.cmd_hist = deque(maxlen=self.delay_steps + 1)
         self._f = None
         if self.delay_steps:
@@ -128,7 +129,11 @@ class OracleNMPC(MultirotorControlTemplate):
             kw = dict(tau_m=ctrl_params.get('tau_m'))
             kw.update(kf_kwargs)
             self.kf = LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, **kw)
-            self.est_log = []
+        elif level == 'learned':
+            from icon_mpc.learned.estimator import LearnedEstimator
+            self.kf = LearnedEstimator(self.p_nom, self.k_eta_ctrl, dt=sim_dt,
+                                       tau_m=ctrl_params.get('tau_m'), **kf_kwargs)
+        self.est_log = []
 
     def update_trajectory(self, trajectory):
         self.trajectory = trajectory
@@ -138,7 +143,7 @@ class OracleNMPC(MultirotorControlTemplate):
         N = self.N
         if self.level in ('nominal', 'aero'):
             return np.tile(self.p_nom, (N + 1, 1))
-        if self.level == 'kf':
+        if self.level in ('kf', 'learned'):
             p = self.p_nom.copy()
             p[LAYOUT.slices['F']], p[LAYOUT.slices['tau']] = self.kf.estimate()
             return np.tile(p, (N + 1, 1))
@@ -167,16 +172,22 @@ class OracleNMPC(MultirotorControlTemplate):
         return x
 
     def update(self, t, state, flat_output):
+        # command applied over the last step = issued delay_steps before it
+        applied = self.cmd_hist[0] if self.cmd_hist else None
+        omega_cmd_prev = np.sqrt(applied / self.k_eta_ctrl) if applied is not None else None
+        if self.record is not None:
+            self.record.append(({k: np.array(state[k], float) for k in ('x', 'v', 'q', 'w', 'rotor_speeds')},
+                                omega_cmd_prev))
         if self.kf is not None:
-            # command applied over the last step = issued delay_steps before it
-            applied = self.cmd_hist[0] if self.cmd_hist else None
-            omega_cmd_prev = np.sqrt(applied / self.k_eta_ctrl) if applied is not None else None
             self.est_log.append(np.concatenate(self.kf.update(state, omega_cmd_prev)))
         if self.step % self.solve_every == 0:
             params = self._stage_params(t, state)
             q = state['q']
             x0 = np.concatenate([state['x'], state['v'], [q[3], q[0], q[1], q[2]], state['w']])
-            if self.filt and self.kf is not None:
+            if self.filt == 2 and getattr(self.kf, 'xf', None) is not None:
+                # learned state filter: [p, v, w] (attitude stays measured)
+                x0[0:6], x0[10:13] = self.kf.xf[0:6], self.kf.xf[6:9]
+            elif self.filt and self.kf is not None:
                 x0[3:6], x0[10:13] = self.kf.z[0:3], self.kf.z[3:6]
             t_ref = t
             if self.delay_steps:

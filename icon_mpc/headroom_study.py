@@ -137,7 +137,7 @@ def get_components(experiment, num_trials, seed, trajectory):
 
 
 ROLLOUT_TIMEOUT_S = 25
-TASK_TIMEOUT_S = 60
+TASK_TIMEOUT_S = int(os.environ.get("TASK_TIMEOUT_S", 60))
 DIVERGE_ERR_M = 10.0  # abort once tracking error exceeds this (counted as failure)
 
 
@@ -161,9 +161,17 @@ def compute_metrics(res):
     }
 
 
+def _num(v):
+    try:
+        return float(v)
+    except ValueError:
+        return v
+
+
 def run_task(task):
     experiment, ctrl_name, i, num_trials, seed, trajectory, *rest = task
     regime = rest[0] if rest else 'base'
+    collect = len(rest) > 1 and rest[1] == 'collect'
     from rotorpy.environments import Environment
     from run_eval import switch_controller
     from icon_mpc.oracle_controller import OracleNMPC, Privileged
@@ -186,7 +194,7 @@ def run_task(task):
     if ctrl_name.startswith('nmpc+') and ctrl_name.endswith(']'):
         # e.g. nmpc+kf[q_F=10,filt=1,delay=0.02], nmpc+dist[delay=0.02]
         level, args_s = ctrl_name[5:-1].split('[')
-        kw = {k: float(v) for k, v in (a.split('=') for a in args_s.split(','))}
+        kw = {k: _num(v) for k, v in (a.split('=') for a in args_s.split(','))}
         priv = Privileged(vehicle, wind_seq, ext_f, ext_t, toggles, SIM_DT)
         controller = OracleNMPC(cparams, level=level, privileged=priv, kf_kwargs=kw)
     elif ctrl_name in ORACLES:
@@ -198,6 +206,8 @@ def run_task(task):
         controller = switch_controller(ctrl_name, cparams)
     os.chdir(REPO)
     controller.update_trajectory(traj)
+    if collect:
+        controller.record = []
 
     env = Environment(vehicle=vehicle, controller=controller,
                       wind_profile=RecordedWind(wind_seq) if wind_seq is not None else None,
@@ -239,10 +249,26 @@ def run_task(task):
         m = {'rmse': np.inf, 'rmse_after1s': np.inf, 'max_err': np.inf, 'heading_deg': np.nan,
              'heading_wrapped_deg': np.nan, 'cmd_rate': np.nan, 'error': repr(e)[:200]}
     faulthandler.cancel_dump_traceback_later()
+    if collect:
+        m['data'] = _training_data(controller, res, cparams) if np.isfinite(m['rmse']) else None
     m.update(regime=regime, experiment=experiment, controller=ctrl_name, trial=i, wall_s=time.time() - t0,
              solve_fail=getattr(getattr(controller, 'mpc', None), 'n_fail', np.nan),
              solve_ms=float(np.mean(controller.solve_times) * 1e3) if getattr(controller, 'solve_times', None) else np.nan)
     return m
+
+
+def _training_data(controller, res, cparams):
+    """Features (as the controller saw them online) + true lumped-disturbance labels."""
+    from icon_mpc.learned.features import FeatureExtractor, labels_from_truth
+    fe = FeatureExtractor(controller.p_nom, controller.k_eta_ctrl, SIM_DT, cparams.get('tau_m'))
+    feats, base, sbase = zip(*[fe.step(st, oc) for st, oc in controller.record])
+    S = res['state']
+    xs = np.concatenate([S['x'], S['v'], S['q'][:, [3, 0, 1, 2]], S['w']], axis=1)
+    lab = labels_from_truth(fe.model, xs, S['rotor_speeds'], res['control']['cmd_motor_speeds'])
+    n = min(len(lab), len(feats))
+    return {'feat': np.stack(feats[:n]), 'base': np.stack(base[:n]), 'label': lab[:n],
+            'sbase': np.stack(sbase[:n]),
+            'slabel': np.concatenate([S['x'], S['v'], S['w']], axis=1)[:n].astype(np.float32)}
 
 
 def prebuild_task(task):
@@ -282,6 +308,7 @@ def main():
     ap.add_argument('--regimes', nargs='+', default=['base'])
     ap.add_argument('--out', default=os.path.join(REPO, 'icon_mpc', 'results', 'headroom.csv'))
     args = ap.parse_args()
+    args.out = os.path.abspath(args.out)  # baseline MPC code chdirs; never rely on cwd
     _init_worker()
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
@@ -298,6 +325,7 @@ def main():
             with mp.get_context('spawn').Pool(args.workers, initializer=_init_worker) as pool:
                 list(pool.imap_unordered(prebuild_task, pre))
 
+    os.chdir(REPO)
     tasks = [(e, c, i, args.num_trials, args.seed, args.trajectory, r) for r in args.regimes
              for e in args.experiments for c in args.controllers for i in range(args.num_trials)]
     print(f'{len(tasks)} rollouts on {args.workers} workers')
