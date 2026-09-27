@@ -81,8 +81,12 @@ class LumpedKF:
         P_pred = A @ self.P @ A.T + self.Q
 
         S = self.H @ P_pred @ self.H.T + self.R
-        K = P_pred @ self.H.T @ np.linalg.inv(S)
-        self.z = z_pred + K @ (y - self.H @ z_pred)
+        Sinv = np.linalg.inv(S)
+        K = P_pred @ self.H.T @ Sinv
+        nu = y - self.H @ z_pred
+        # innovation log-likelihood (used by the multiple-model estimator)
+        self.loglik = -0.5 * (nu @ Sinv @ nu + np.linalg.slogdet(S)[1])
+        self.z = z_pred + K @ nu
         self.P = (np.eye(12) - K @ self.H) @ P_pred
         self.prev = (x, np.asarray(state['rotor_speeds'], float).copy())
         return self.estimate()
@@ -119,3 +123,38 @@ class DelayID:
             self.d = int(np.argmin(self.cost))
         self.prev = om
         return self.d
+
+
+class MMAE:
+    """Multiple-model adaptive estimator (classical adaptive baseline to the learned blend).
+
+    Runs a bank of fixed-gain LumpedKFs and mixes their estimates with posterior model
+    probabilities from exponentially-forgotten innovation log-likelihoods (forgetting lets the
+    posterior switch when the regime changes). A probability floor keeps every model alive.
+    """
+
+    def __init__(self, p_nom, k_eta_ctrl, dt=0.01, tau_m=None, bank=None, forget=0.98, floor=1e-3, **_):
+        from icon_mpc.learned.features import KF_BANK
+        self.kfs = [LumpedKF(p_nom, k_eta_ctrl, dt=dt, tau_m=tau_m, **kw) for kw in (bank or KF_BANK)]
+        self.L = np.zeros(len(self.kfs))
+        self.forget, self.floor = forget, floor
+        self.w = np.full(len(self.kfs), 1.0 / len(self.kfs))
+
+    def update(self, state, omega_cmd_prev=None):
+        for i, kf in enumerate(self.kfs):
+            kf.update(state, omega_cmd_prev)
+            self.L[i] = self.forget * self.L[i] + getattr(kf, 'loglik', 0.0)
+        w = np.exp(self.L - self.L.max())
+        w = w / w.sum()
+        w = np.maximum(w, self.floor)
+        self.w = w / w.sum()
+        return self.estimate()
+
+    @property
+    def z(self):
+        return sum(w * kf.z for w, kf in zip(self.w, self.kfs))
+
+    def estimate(self):
+        F = sum(w * kf.z[6:9] for w, kf in zip(self.w, self.kfs))
+        tau = sum(w * kf.z[9:12] for w, kf in zip(self.w, self.kfs))
+        return F, tau

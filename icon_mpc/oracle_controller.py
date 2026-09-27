@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation
 from controller.controller_template import MultirotorControlTemplate
 from icon_mpc.nmpc import ParamNMPCSolver, get_param_nmpc, LAYOUT, nominal_params, vehicle_params, GRAV
 
-LEVELS = ['nominal', 'aero', 'kf', 'learned', 'params', 'dist', 'future']  # levels >= 'params' are privileged
+LEVELS = ['nominal', 'aero', 'kf', 'mmae', 'learned', 'params', 'dist', 'future']  # levels >= 'params' are privileged
 
 
 def flat_to_state_ref(flat, mass, thrust_gain_sum):
@@ -142,6 +142,9 @@ class OracleNMPC(MultirotorControlTemplate):
             kw = dict(tau_m=ctrl_params.get('tau_m'))
             kw.update(kf_kwargs)
             self.kf = LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, **kw)
+        elif level == 'mmae':
+            from icon_mpc.estimators import MMAE
+            self.kf = MMAE(self.p_nom, self.k_eta_ctrl, dt=sim_dt, tau_m=ctrl_params.get('tau_m'), **kf_kwargs)
         elif level == 'learned':
             from icon_mpc.learned.estimator import LearnedEstimator
             self.kf = LearnedEstimator(self.p_nom, self.k_eta_ctrl, dt=sim_dt,
@@ -156,7 +159,7 @@ class OracleNMPC(MultirotorControlTemplate):
         N = self.N
         if self.level in ('nominal', 'aero'):
             return np.tile(self.p_nom, (N + 1, 1))
-        if self.level in ('kf', 'learned'):
+        if self.level in ('kf', 'mmae', 'learned'):
             p = self.p_nom.copy()
             p[LAYOUT.slices['F']], p[LAYOUT.slices['tau']] = self.kf.estimate()
             return np.tile(p, (N + 1, 1))
