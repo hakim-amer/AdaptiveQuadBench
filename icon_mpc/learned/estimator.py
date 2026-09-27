@@ -38,7 +38,7 @@ class LearnedEstimator:
         self.out_sd = torch.as_tensor(ck['out_sd'])
         self.state = self.net.init_state(1, 'cpu')
         self.acc = np.zeros(6)
-        self.xf = None  # learned filtered [p, v, w]
+        self.xf = None  # learned filtered [p, v, w, attitude-correction rotvec]
 
     @property
     def z(self):
@@ -51,7 +51,7 @@ class LearnedEstimator:
             y, self.state = self.net.step(x, self.state)
             corr = (y[0, :len(self.out_sd)] * self.out_sd).numpy()
         self.acc = base + corr[:6]
-        self.xf = sbase + corr[6:15]
+        self.xf = sbase + corr[6:]
         return self.estimate()
 
     def estimate(self):

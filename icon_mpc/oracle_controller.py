@@ -185,8 +185,11 @@ class OracleNMPC(MultirotorControlTemplate):
             q = state['q']
             x0 = np.concatenate([state['x'], state['v'], [q[3], q[0], q[1], q[2]], state['w']])
             if self.filt == 2 and getattr(self.kf, 'xf', None) is not None:
-                # learned state filter: [p, v, w] (attitude stays measured)
+                # learned state filter: [p, v, w] + left attitude correction
                 x0[0:6], x0[10:13] = self.kf.xf[0:6], self.kf.xf[6:9]
+                if len(self.kf.xf) >= 12:
+                    qf = (Rotation.from_rotvec(self.kf.xf[9:12]) * Rotation.from_quat(q)).as_quat()
+                    x0[6:10] = [qf[3], qf[0], qf[1], qf[2]]
             elif self.filt and self.kf is not None:
                 x0[3:6], x0[10:13] = self.kf.z[0:3], self.kf.z[3:6]
             t_ref = t

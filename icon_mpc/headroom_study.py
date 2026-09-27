@@ -81,6 +81,9 @@ def _patch_baseline_acados():
 def _init_worker():
     if REPO not in sys.path:
         sys.path.insert(0, REPO)
+    if os.environ.get('ICON_PRELOAD_TORCH'):
+        import torch  # noqa: F401  (heavy import; keep it out of the per-task timeout)
+        torch.set_num_threads(1)
     os.chdir(REPO)
     _patch_baseline_acados()
 
@@ -262,13 +265,17 @@ def _training_data(controller, res, cparams):
     from icon_mpc.learned.features import FeatureExtractor, labels_from_truth
     fe = FeatureExtractor(controller.p_nom, controller.k_eta_ctrl, SIM_DT, cparams.get('tau_m'))
     feats, base, sbase = zip(*[fe.step(st, oc) for st, oc in controller.record])
+    from scipy.spatial.transform import Rotation
     S = res['state']
     xs = np.concatenate([S['x'], S['v'], S['q'][:, [3, 0, 1, 2]], S['w']], axis=1)
+    q_meas = np.stack([st['q'] for st, _ in controller.record])
     lab = labels_from_truth(fe.model, xs, S['rotor_speeds'], res['control']['cmd_motor_speeds'])
     n = min(len(lab), len(feats))
     return {'feat': np.stack(feats[:n]), 'base': np.stack(base[:n]), 'label': lab[:n],
             'sbase': np.stack(sbase[:n]),
-            'slabel': np.concatenate([S['x'], S['v'], S['w']], axis=1)[:n].astype(np.float32)}
+            'slabel': np.concatenate([S['x'][:n], S['v'][:n], S['w'][:n],
+                                      (Rotation.from_quat(S['q'][:n]) * Rotation.from_quat(q_meas[:n]).inv()).as_rotvec()],
+                                     axis=1).astype(np.float32)}
 
 
 def prebuild_task(task):
@@ -325,6 +332,8 @@ def main():
             with mp.get_context('spawn').Pool(args.workers, initializer=_init_worker) as pool:
                 list(pool.imap_unordered(prebuild_task, pre))
 
+    if any('learned' in c for c in args.controllers):
+        os.environ['ICON_PRELOAD_TORCH'] = '1'
     os.chdir(REPO)
     tasks = [(e, c, i, args.num_trials, args.seed, args.trajectory, r) for r in args.regimes
              for e in args.experiments for c in args.controllers for i in range(args.num_trials)]

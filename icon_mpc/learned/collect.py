@@ -18,6 +18,7 @@ import numpy as np
 from icon_mpc.headroom_study import REPO, _init_worker, run_task
 
 BEHAVIOUR = ['nmpc+kf[q_F=10,r_v=0.05,r_w=0.05,q_tau=0.1,filt=1]',
+             'nmpc+kf[q_F=10,r_v=0.15,r_w=0.15,q_tau=0.1,filt=1]',
              'nmpc+kf[q_F=1,r_v=0.15,r_w=0.15,q_tau=0.1,filt=1]',
              'nmpc+kf[q_F=30,r_v=0.001,r_w=0.001,q_tau=0.3,filt=1]']
 NOISY = ('noise', 'noise_hi', 'combo')
@@ -28,7 +29,7 @@ def behaviour_for(regime, i, policy=None):
     if policy:
         return policy
     # the fast (low-R) KF destabilises the NMPC under sensor noise; skip it there
-    pool = BEHAVIOUR[:2] if regime in NOISY else BEHAVIOUR
+    pool = BEHAVIOUR[:3] if regime in NOISY else BEHAVIOUR
     return pool[i % len(pool)]
 
 

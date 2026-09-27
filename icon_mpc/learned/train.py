@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from icon_mpc.learned.features import KF_BANK
 from icon_mpc.models.mamba import MambaStack
 
 MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'results', 'models')
@@ -149,20 +150,22 @@ def main():
     net.load_state_dict(best_state)
     err = evaluate(va)
     reg = D['regime'][va]
-    print('\nval RMSE per regime  [force m/s^2 / torque rad/s^2]    state [p mm / v cm/s / w cm/s]:')
+    print('\nval RMSE per regime  [force m/s^2 / torque rad/s^2]    state [p mm / v cm/s / w cm/s / att deg]:')
     lab6 = label[va][..., :6]
-    kf_err = {j: (feat[va][..., -18 + 6 * j:-12 + 6 * j if j < 2 else None] - lab6).numpy()
-              for j in range(3)}
+    nK = len(KF_BANK)
+    kf_err = {j: (feat[va][..., -6 * (nK - j):(-6 * (nK - j - 1)) or None] - lab6).numpy()
+              for j in range(nK)}
     rows = {'learned': per_regime_rmse(err[..., :6], reg)}
-    rows.update({f'kf{j}': per_regime_rmse(kf_err[j], reg) for j in range(3)})
+    rows.update({f'kf{j}': per_regime_rmse(kf_err[j], reg) for j in range(nK)})
     serr_l = err[..., 6:]
     serr_b = (base[va][..., 6:] - label[va][..., 6:]).numpy()
-    srm = lambda e, m: (1e3 * np.sqrt((e[m][..., 0:3] ** 2).mean()), 1e2 * np.sqrt((e[m][..., 3:6] ** 2).mean()),
-                        1e2 * np.sqrt((e[m][..., 6:9] ** 2).mean()))
+    rms = lambda e, a, b: np.sqrt((e[..., a:b] ** 2).mean())
+    srm = lambda e, m: (1e3 * rms(e[m], 0, 3), 1e2 * rms(e[m], 3, 6), 1e2 * rms(e[m], 6, 9),
+                        np.rad2deg(rms(e[m], 9, 12)) if e.shape[-1] >= 12 else 0.0)
     for r in np.unique(reg):
         m = reg == r
         print(f'  {r:12s} ' + '  '.join(f'{n}: {rows[n][r][0]:.3f}/{rows[n][r][1]:.3f}' for n in rows)
-              + '   state learned %.1f/%.1f/%.1f' % srm(serr_l, m) + '  meas+kf %.1f/%.1f/%.1f' % srm(serr_b, m))
+              + '   state learned %.1f/%.1f/%.1f/%.2f' % srm(serr_l, m) + '  meas+kf %.1f/%.1f/%.1f/%.2f' % srm(serr_b, m))
     os.makedirs(MODEL_DIR, exist_ok=True)
     torch.save({'cfg': cfg, 'state_dict': best_state, 'feat_mu': mu, 'feat_sd': sd, 'out_sd': out_sd,
                 'val_trials': val_trials, 'args': vars(args)}, os.path.join(MODEL_DIR, f'{args.name}.pt'))

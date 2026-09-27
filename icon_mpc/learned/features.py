@@ -24,10 +24,13 @@ from icon_mpc.nmpc import LAYOUT, build_model
 # regimes (see kf_grid results). The SSM learns to select / blend / correct them.
 KF_BANK = (dict(q_F=30.0, q_tau=0.3, r_v=1e-3, r_w=1e-3),
            dict(q_F=10.0, q_tau=0.1, r_v=0.05, r_w=0.05),
+           dict(q_F=10.0, q_tau=0.1, r_v=0.15, r_w=0.15),
            dict(q_F=1.0, q_tau=0.1, r_v=0.15, r_w=0.15))
-BASE_KF = 1  # network output = BASE_KF estimate + learned correction
-# outputs: 6 disturbance accels [F/m, J^-1 tau] (one step ahead) + 9 filtered state [p, v, w] (now)
-D_DIST, D_STATE = 6, 9
+BASE_KF = 2  # most robust fixed gain (100% success in every regime); output = base + correction
+# outputs: 6 disturbance accels [F/m, J^-1 tau] (short-horizon mean) + 12 filtered state
+# [p, v, w, attitude correction rotvec (world, left-multiplied onto the measured attitude)]
+D_DIST, D_STATE = 6, 12
+LABEL_AVG = 5  # disturbance label = mean of the next LABEL_AVG one-step labels
 
 
 class _Model:
@@ -69,7 +72,7 @@ class FeatureExtractor:
         self.kfs = [LumpedKF(p_nom, k_eta, dt=dt, tau_m=tau_m, **kw) for kw in KF_BANK]
         self.f_hover = self.model.m * 9.81 / 4
         self.prev = None
-        self.dim = 9 + 3 + 3 + 4 + 4 + 6 + 6 * len(KF_BANK)
+        self.dim = 9 + 3 + 3 + 4 + 4 + 6 + 6 + 6 * len(KF_BANK)
 
     def kf_accel(self, kf):
         F, tau = kf.estimate()
@@ -83,15 +86,20 @@ class FeatureExtractor:
         om = np.asarray(state['rotor_speeds'], float)
         for kf in self.kfs:
             kf.update(state, omega_cmd_prev)
-        res = (np.zeros(6) if self.prev is None
-               else self.model.residual(self.prev[0], x, self.prev[1], omega_cmd_prev))
-        self.prev = (x, om.copy())
+        Rq = Rotation.from_quat(state['q'])
+        if self.prev is None:
+            res, inc = np.zeros(6), np.zeros(6)
+        else:
+            res = self.model.residual(self.prev[0], x, self.prev[1], omega_cmd_prev)
+            # kinematic consistency: position / attitude increments vs measured v / w (noise cues)
+            inc = np.concatenate([(x[0:3] - self.prev[0][0:3]) / self.model.dt - x[3:6],
+                                  (self.prev[2].inv() * Rq).as_rotvec() / self.model.dt - x[10:13]])
+        self.prev = (x, om.copy(), Rq)
         u_prev = (self.model.k_eta * omega_cmd_prev ** 2 / self.f_hover if omega_cmd_prev is not None
                   else np.ones(4))
-        Rm = Rotation.from_quat(state['q']).as_matrix().ravel()
         kfe = [self.kf_accel(kf) for kf in self.kfs]
-        feat = np.concatenate([Rm, x[3:6], x[10:13], om / 1000.0, u_prev, res] + kfe)
-        sbase = np.concatenate([x[0:3], self.kfs[BASE_KF].z[0:6]])
+        feat = np.concatenate([Rq.as_matrix().ravel(), x[3:6], x[10:13], om / 1000.0, u_prev, res, inc] + kfe)
+        sbase = np.concatenate([x[0:3], self.kfs[BASE_KF].z[0:6], np.zeros(3)])
         return feat.astype(np.float32), kfe[BASE_KF].astype(np.float32), sbase.astype(np.float32)
 
     def to_wrench(self, acc6):
@@ -99,8 +107,13 @@ class FeatureExtractor:
         return self.model.m * acc6[:3], self.model.J @ acc6[3:]
 
 
-def labels_from_truth(model, xs, omegas, omega_cmds):
+def labels_from_truth(model, xs, omegas, omega_cmds, avg=LABEL_AVG):
     """xs: (T, 13) true states, omegas: (T, 4) true rotor speeds, omega_cmds: (T, 4) applied
-    commands over [k, k+1]. Returns (T-1, 6) labels in acceleration units."""
-    return np.stack([model.residual(xs[k], xs[k + 1], omegas[k], omega_cmds[k])
-                     for k in range(len(xs) - 1)]).astype(np.float32)
+    commands over [k, k+1]. Returns (T-1, 6) labels in acceleration units: the mean one-step
+    residual over [k, k+avg) (truncated at the end), i.e. the disturbance the NMPC will face next."""
+    one = np.stack([model.residual(xs[k], xs[k + 1], omegas[k], omega_cmds[k])
+                    for k in range(len(xs) - 1)])
+    c = np.concatenate([np.zeros((1, 6)), np.cumsum(one, 0)])
+    idx = np.arange(len(one))
+    hi = np.minimum(idx + avg, len(one))
+    return ((c[hi] - c[idx]) / (hi - idx)[:, None]).astype(np.float32)
