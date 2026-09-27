@@ -15,7 +15,7 @@ from scipy.spatial.transform import Rotation
 from controller.controller_template import MultirotorControlTemplate
 from icon_mpc.nmpc import ParamNMPCSolver, get_param_nmpc, LAYOUT, nominal_params, vehicle_params, GRAV
 
-LEVELS = ['nominal', 'aero', 'params', 'dist', 'future']
+LEVELS = ['nominal', 'aero', 'kf', 'params', 'dist', 'future']  # levels >= 'params' are privileged
 
 
 def flat_to_state_ref(flat, mass, thrust_gain_sum):
@@ -89,7 +89,7 @@ class Privileged:
 
 class OracleNMPC(MultirotorControlTemplate):
     def __init__(self, ctrl_params, level='nominal', privileged=None, solve_every=1,
-                 t_horizon=0.5, n_nodes=10, sim_dt=0.01, dist_lag=None):
+                 t_horizon=0.5, n_nodes=10, sim_dt=0.01, dist_lag=None, kf_kwargs=None):
         super().__init__(ctrl_params)
         # dist_lag (s): 'dist' level sees the ground truth from dist_lag ago (emulates estimator delay)
         self.dist_lag = dist_lag
@@ -107,6 +107,13 @@ class OracleNMPC(MultirotorControlTemplate):
         self.step = 0
         self.u = np.full(4, ctrl_params['mass'] * GRAV / 4)
         self.solve_times = []
+        self.kf = None
+        if level == 'kf':
+            from icon_mpc.estimators import LumpedKF
+            kw = dict(tau_m=ctrl_params.get('tau_m'))
+            kw.update(kf_kwargs or {})
+            self.kf = LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, **kw)
+            self.est_log = []
 
     def update_trajectory(self, trajectory):
         self.trajectory = trajectory
@@ -116,6 +123,10 @@ class OracleNMPC(MultirotorControlTemplate):
         N = self.N
         if self.level in ('nominal', 'aero'):
             return np.tile(self.p_nom, (N + 1, 1))
+        if self.level == 'kf':
+            p = self.p_nom.copy()
+            p[LAYOUT.slices['F']], p[LAYOUT.slices['tau']] = self.kf.estimate()
+            return np.tile(p, (N + 1, 1))
         if self.level == 'future':
             ts = t + self.sim_dt + np.arange(N + 1) * (self.T / N)
             return np.stack([self.priv.truth_at(tk, self.k_eta_ctrl) for tk in ts])
@@ -129,6 +140,9 @@ class OracleNMPC(MultirotorControlTemplate):
         return np.tile(p, (N + 1, 1))
 
     def update(self, t, state, flat_output):
+        if self.kf is not None:
+            omega_cmd_prev = np.sqrt(self.u / self.k_eta_ctrl) if self.step > 0 else None
+            self.est_log.append(np.concatenate(self.kf.update(state, omega_cmd_prev)))
         if self.step % self.solve_every == 0:
             params = self._stage_params(t, state)
             q = state['q']

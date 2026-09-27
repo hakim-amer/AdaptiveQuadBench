@@ -32,6 +32,7 @@ ORACLES = {
     'nmpc+params': ('params', 1),
     'nmpc+dist': ('dist', 1),
     'nmpc+future': ('future', 1),
+    'nmpc+kf': ('kf', 1),
     # estimator-delay sweep: disturbance/parameter truth delayed by the given lag
     'nmpc+dist@0ms': ('dist', 1, 0.0),
     'nmpc+dist@30ms': ('dist', 1, 0.03),
@@ -169,7 +170,11 @@ def run_task(task):
     toggles = c['toggle_times'][i] if c['toggle_times'] is not None else None
     cparams = c['controller_params'][i]
 
-    if ctrl_name in ORACLES:
+    if ctrl_name.startswith('nmpc+kf['):
+        # e.g. nmpc+kf[q_F=10,q_tau=0.3]  (tuning sweeps)
+        kw = {k: float(v) for k, v in (a.split('=') for a in ctrl_name[8:-1].split(','))}
+        controller = OracleNMPC(cparams, level='kf', kf_kwargs=kw)
+    elif ctrl_name in ORACLES:
         level, every, *lag = ORACLES[ctrl_name]
         priv = Privileged(vehicle, wind_seq, ext_f, ext_t, toggles, SIM_DT)
         controller = OracleNMPC(cparams, level=level, privileged=priv, solve_every=every,
