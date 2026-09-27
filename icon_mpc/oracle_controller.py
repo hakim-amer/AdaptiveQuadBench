@@ -180,6 +180,8 @@ class OracleNMPC(MultirotorControlTemplate):
                                 omega_cmd_prev))
         if self.kf is not None:
             self.est_log.append(np.concatenate(self.kf.update(state, omega_cmd_prev)))
+            if self.record is not None and getattr(self.kf, 'xf', None) is not None:
+                self.xf_log = getattr(self, 'xf_log', []) + [self.kf.xf.copy()]
         if self.step % self.solve_every == 0:
             params = self._stage_params(t, state)
             q = state['q']

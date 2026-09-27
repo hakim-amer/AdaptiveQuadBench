@@ -30,6 +30,9 @@ BASE_KF = 2  # most robust fixed gain (100% success in every regime); output = b
 # outputs: 6 disturbance accels [F/m, J^-1 tau] (short-horizon mean) + 12 filtered state
 # [p, v, w, attitude correction rotvec (world, left-multiplied onto the measured attitude)]
 D_DIST, D_STATE = 6, 12
+# feature layout: R(9) v(3) w(3) omega(4) u_prev(4) | residual(6) | increments(6) | KF bank(6 each)
+RES_SLICE = slice(23, 29)
+KF_START = 35
 LABEL_AVG = 5  # disturbance label = mean of the next LABEL_AVG one-step labels
 
 

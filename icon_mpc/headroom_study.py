@@ -273,6 +273,8 @@ def _training_data(controller, res, cparams):
     n = min(len(lab), len(feats))
     return {'feat': np.stack(feats[:n]), 'base': np.stack(base[:n]), 'label': lab[:n],
             'sbase': np.stack(sbase[:n]),
+            'est': np.asarray(controller.est_log[:n], np.float32) if controller.est_log else None,
+            'xf': np.asarray(getattr(controller, 'xf_log', [])[:n], np.float32),
             'slabel': np.concatenate([S['x'][:n], S['v'][:n], S['w'][:n],
                                       (Rotation.from_quat(S['q'][:n]) * Rotation.from_quat(q_meas[:n]).inv()).as_rotvec()],
                                      axis=1).astype(np.float32)}

@@ -43,6 +43,10 @@ class GRUNet(nn.Module):
 
 
 def build_model(cfg):
+    if cfg['arch'] in ('gain', 'gain_nomix'):
+        from icon_mpc.models.gain import GainNet
+        return GainNet(cfg['d_in'], cfg['d_out'], cfg['d_model'], cfg['n_layers'], cfg['d_state'],
+                       mix=cfg['arch'] == 'gain')
     if cfg['arch'] == 'gru':
         return GRUNet(cfg['d_in'], cfg['d_out'], cfg['d_model'], cfg['n_layers'])
     return MambaStack(cfg['d_in'], cfg['d_out'], cfg['d_model'], cfg['n_layers'], cfg['d_state'],
@@ -68,7 +72,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data', nargs='+', required=True)
     ap.add_argument('--name', required=True)
-    ap.add_argument('--arch', default='mamba', choices=['mamba', 'lti', 'gru'])
+    ap.add_argument('--arch', default='mamba', choices=['mamba', 'lti', 'gru', 'gain', 'gain_nomix'])
     ap.add_argument('--d_model', type=int, default=64)
     ap.add_argument('--n_layers', type=int, default=2)
     ap.add_argument('--d_state', type=int, default=16)
@@ -77,6 +81,10 @@ def main():
     ap.add_argument('--lr', type=float, default=2e-3)
     ap.add_argument('--val_frac', type=float, default=0.1)
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--ms_weight', type=float, default=0.0,
+                    help='weight of the multi-scale (low-frequency) error loss; closed-loop tracking is '
+                         'driven by the low-frequency part of the estimation error, which MSE under-weights')
+    ap.add_argument('--ms_windows', type=int, nargs='+', default=[10, 25, 50])
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -107,14 +115,29 @@ def main():
     cfg = dict(arch=args.arch, d_in=feat.shape[-1], d_out=2 * DO, d_model=args.d_model,
                n_layers=args.n_layers, d_state=args.d_state)
     net = build_model(cfg).to(dev)
+    if hasattr(net, 'set_norm'):
+        net.set_norm(mu.to(dev), sd.to(dev), out_sd.to(dev))
     print(f'{sum(p.numel() for p in net.parameters())} params')
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
     steps = args.epochs * max(1, len(tr) // args.bs)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, args.lr, total_steps=steps, pct_start=0.05)
 
+    def causal_avg(e, w):
+        c = torch.cumsum(torch.nn.functional.pad(e, (0, 0, 1, 0)), dim=1)
+        idx = torch.arange(1, e.shape[1] + 1, device=e.device)
+        lo = (idx - w).clamp(min=0)
+        return (c[:, idx] - c[:, lo]) / (idx - lo).to(e.dtype)[None, :, None]
+
     def loss_fn(out, y):
         mean, logvar = out[..., :DO], out[..., DO:].clamp(-8, 6)
-        return (0.5 * ((mean - y) ** 2 * torch.exp(-logvar) + logvar)).mean(), ((mean - y) ** 2).mean()
+        e = mean - y
+        loss = (0.5 * (e ** 2 * torch.exp(-logvar) + logvar)).mean()
+        if args.ms_weight > 0:
+            # errors are in units of the per-dim correction std; low-pass errors are much smaller,
+            # so normalise each scale by the raw error variance to keep the weights comparable
+            for w in args.ms_windows:
+                loss = loss + args.ms_weight * (causal_avg(e, w) ** 2).mean() * w ** 0.5
+        return loss, (e ** 2).mean()
 
     def evaluate(idx):
         net.eval()
