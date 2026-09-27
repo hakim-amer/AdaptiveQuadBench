@@ -10,6 +10,8 @@ Levels (cumulative):
 """
 
 import copy
+from collections import deque
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 from controller.controller_template import MultirotorControlTemplate
@@ -102,7 +104,20 @@ class OracleNMPC(MultirotorControlTemplate):
         self.k_eta_ctrl = ctrl_params['k_eta']
         f_max = self.k_eta_ctrl * ctrl_params['rotor_speed_max'] ** 2
         self.mpc = get_param_nmpc(f_max, t_horizon, n_nodes)
-        self.p_nom = nominal_params(ctrl_params, self.k_eta_ctrl, aero=(level != 'nominal'))
+        kf_kwargs = dict(kf_kwargs or {})
+        aero = bool(kf_kwargs.pop('aero', level != 'nominal'))
+        # delay (s): known actuation latency -> KF uses the command actually applied and the NMPC
+        # predicts the state forward over the delay; filt: feed KF-filtered v, w to the NMPC.
+        self.delay_steps = int(round(kf_kwargs.pop('delay', 0.0) / sim_dt))
+        self.filt = bool(kf_kwargs.pop('filt', 0))
+        self.cmd_hist = deque(maxlen=self.delay_steps + 1)
+        self._f = None
+        if self.delay_steps:
+            from icon_mpc.nmpc import build_model
+            import casadi as cs
+            mdl = build_model('icon_pred_model')
+            self._f = cs.Function('f', [mdl.x, mdl.u, mdl.p], [mdl.f_expl_expr])
+        self.p_nom = nominal_params(ctrl_params, self.k_eta_ctrl, aero=aero)
         self.trajectory = None
         self.step = 0
         self.u = np.full(4, ctrl_params['mass'] * GRAV / 4)
@@ -111,7 +126,7 @@ class OracleNMPC(MultirotorControlTemplate):
         if level == 'kf':
             from icon_mpc.estimators import LumpedKF
             kw = dict(tau_m=ctrl_params.get('tau_m'))
-            kw.update(kf_kwargs or {})
+            kw.update(kf_kwargs)
             self.kf = LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, **kw)
             self.est_log = []
 
@@ -139,18 +154,38 @@ class OracleNMPC(MultirotorControlTemplate):
             p[LAYOUT.slices['wind']] = state.get('wind', np.zeros(3))
         return np.tile(p, (N + 1, 1))
 
+    def _predict(self, x, params):
+        """RK4 roll-forward over the actuation delay with the commands already in the pipeline."""
+        pend = list(self.cmd_hist)[-self.delay_steps:] if self.cmd_hist else []
+        pend = [pend[0]] * (self.delay_steps - len(pend)) + pend if pend else [self.u] * self.delay_steps
+        f = lambda xx, uu: np.asarray(self._f(xx, uu, params)).ravel()
+        h = self.sim_dt
+        for u in pend:
+            k1 = f(x, u); k2 = f(x + h / 2 * k1, u); k3 = f(x + h / 2 * k2, u); k4 = f(x + h * k3, u)
+            x = x + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+            x[6:10] /= np.linalg.norm(x[6:10])
+        return x
+
     def update(self, t, state, flat_output):
         if self.kf is not None:
-            omega_cmd_prev = np.sqrt(self.u / self.k_eta_ctrl) if self.step > 0 else None
+            # command applied over the last step = issued delay_steps before it
+            applied = self.cmd_hist[0] if self.cmd_hist else None
+            omega_cmd_prev = np.sqrt(applied / self.k_eta_ctrl) if applied is not None else None
             self.est_log.append(np.concatenate(self.kf.update(state, omega_cmd_prev)))
         if self.step % self.solve_every == 0:
             params = self._stage_params(t, state)
             q = state['q']
             x0 = np.concatenate([state['x'], state['v'], [q[3], q[0], q[1], q[2]], state['w']])
+            if self.filt and self.kf is not None:
+                x0[3:6], x0[10:13] = self.kf.z[0:3], self.kf.z[3:6]
+            t_ref = t
+            if self.delay_steps:
+                x0 = self._predict(x0, params[0])
+                t_ref = t + self.delay_steps * self.sim_dt
             yref = np.zeros((self.N, 17))
             yref_e = None
             for k in range(self.N + 1):
-                fl = self.trajectory.update(t + k * self.T / self.N)
+                fl = self.trajectory.update(t_ref + k * self.T / self.N)
                 pk = params[k]
                 xr, ur = flat_to_state_ref(fl, pk[LAYOUT.slices['m']][0],
                                            pk[LAYOUT.slices['g']].sum())
@@ -164,6 +199,7 @@ class OracleNMPC(MultirotorControlTemplate):
             if np.all(np.isfinite(u)):
                 self.u = np.clip(u, 0, self.mpc.f_max)
             self.solve_times.append(ts)
+        self.cmd_hist.append(self.u.copy())
         self.step += 1
 
         cmd_motor_speeds = np.sqrt(self.u / self.k_eta_ctrl)

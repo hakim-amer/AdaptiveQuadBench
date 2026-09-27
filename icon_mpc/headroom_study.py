@@ -102,8 +102,13 @@ def get_components(experiment, num_trials, seed, trajectory):
     from config.randomization_config import RandomizationConfig
     from rotorpy.vehicles.multirotor import Multirotor
 
-    cfg = RandomizationConfig.from_experiment_type(experiment, num_trials, quad_params, seed,
-                                                   trajectory_type=trajectory)
+    cfg = RandomizationConfig.from_experiment_type(
+        experiment, num_trials, quad_params, seed,
+        trajectory_type='random' if trajectory == 'aggressive' else trajectory)
+    if trajectory == 'aggressive':
+        from icon_mpc.regimes import AGGRESSIVE_TRAJ
+        for k, v in AGGRESSIVE_TRAJ.items():
+            setattr(cfg, k, v)
     comps = {
         'trajectories': cfg.create_trajectories(),
         'wind_profiles': cfg.create_wind_profiles(),
@@ -131,8 +136,9 @@ def get_components(experiment, num_trials, seed, trajectory):
     return comps
 
 
-ROLLOUT_TIMEOUT_S = 60
-TASK_TIMEOUT_S = 120
+ROLLOUT_TIMEOUT_S = 25
+TASK_TIMEOUT_S = 60
+DIVERGE_ERR_M = 10.0  # abort once tracking error exceeds this (counted as failure)
 
 
 def compute_metrics(res):
@@ -156,24 +162,33 @@ def compute_metrics(res):
 
 
 def run_task(task):
-    experiment, ctrl_name, i, num_trials, seed, trajectory = task
+    experiment, ctrl_name, i, num_trials, seed, trajectory, *rest = task
+    regime = rest[0] if rest else 'base'
     from rotorpy.environments import Environment
     from run_eval import switch_controller
     from icon_mpc.oracle_controller import OracleNMPC, Privileged
+    from icon_mpc import regimes as R
+    spec = R.REGIMES[regime]
 
-    c = get_components(experiment, num_trials, seed, trajectory)
+    c = get_components(experiment, num_trials, seed, R.trajectory_kind(regime, trajectory))
     vehicle = copy.deepcopy(c['vehicles'][i])
     traj = c['trajectories'][i]
     wind_seq = c['wind_seqs'][i]
+    if spec.get('gust_front'):
+        wind_seq = R.apply_gust_front(wind_seq, i, SIM_DT, int((T_FINAL + 1.0) / SIM_DT) + 2)
+    if spec.get('rotor_fault'):
+        R.apply_rotor_fault(vehicle, i)
     ext_f = c['ext_force'][i] if c['ext_force'] is not None else None
     ext_t = c['ext_torque'][i] if c['ext_torque'] is not None else None
     toggles = c['toggle_times'][i] if c['toggle_times'] is not None else None
     cparams = c['controller_params'][i]
 
-    if ctrl_name.startswith('nmpc+kf['):
-        # e.g. nmpc+kf[q_F=10,q_tau=0.3]  (tuning sweeps)
-        kw = {k: float(v) for k, v in (a.split('=') for a in ctrl_name[8:-1].split(','))}
-        controller = OracleNMPC(cparams, level='kf', kf_kwargs=kw)
+    if ctrl_name.startswith('nmpc+') and ctrl_name.endswith(']'):
+        # e.g. nmpc+kf[q_F=10,filt=1,delay=0.02], nmpc+dist[delay=0.02]
+        level, args_s = ctrl_name[5:-1].split('[')
+        kw = {k: float(v) for k, v in (a.split('=') for a in args_s.split(','))}
+        priv = Privileged(vehicle, wind_seq, ext_f, ext_t, toggles, SIM_DT)
+        controller = OracleNMPC(cparams, level=level, privileged=priv, kf_kwargs=kw)
     elif ctrl_name in ORACLES:
         level, every, *lag = ORACLES[ctrl_name]
         priv = Privileged(vehicle, wind_seq, ext_f, ext_t, toggles, SIM_DT)
@@ -190,6 +205,10 @@ def run_task(task):
                       ext_force=ext_f, ext_torque=ext_t, disturbance_toggle_times=toggles)
     env.vehicle.initial_state = {'x': np.zeros(3), 'v': np.zeros(3), 'q': np.array([0, 0, 0, 1.]),
                                  'w': np.zeros(3), 'wind': np.zeros(3), 'rotor_speeds': np.zeros(4)}
+    if spec.get('noise'):
+        R.wrap_sensor_noise(controller, i, spec['noise'])
+    if spec.get('latency'):
+        R.wrap_latency(controller, R.latency_of(spec['latency'], i), SIM_DT)
     np.random.seed(i)
     t0 = time.time()
     import faulthandler
@@ -200,6 +219,8 @@ def run_task(task):
         # Diverged rollouts make RK45 extremely stiff; abort them and count as failure.
         if time.time() - t0 > ROLLOUT_TIMEOUT_S:
             raise TimeoutError(f'rollout exceeded {ROLLOUT_TIMEOUT_S}s')
+        if np.linalg.norm(a[1]['x'] - a[2]['x']) > DIVERGE_ERR_M:
+            raise RuntimeError('diverged')
         return _update(*a, **kw)
     controller.update = guarded_update
     _sdot = vehicle._s_dot_fn
@@ -218,7 +239,7 @@ def run_task(task):
         m = {'rmse': np.inf, 'rmse_after1s': np.inf, 'max_err': np.inf, 'heading_deg': np.nan,
              'heading_wrapped_deg': np.nan, 'cmd_rate': np.nan, 'error': repr(e)[:200]}
     faulthandler.cancel_dump_traceback_later()
-    m.update(experiment=experiment, controller=ctrl_name, trial=i, wall_s=time.time() - t0,
+    m.update(regime=regime, experiment=experiment, controller=ctrl_name, trial=i, wall_s=time.time() - t0,
              solve_fail=getattr(getattr(controller, 'mpc', None), 'n_fail', np.nan),
              solve_ms=float(np.mean(controller.solve_times) * 1e3) if getattr(controller, 'solve_times', None) else np.nan)
     return m
@@ -236,10 +257,10 @@ def prebuild_task(task):
 
 def summarize(df):
     rows = []
-    for (exp, ctrl), g in df.groupby(['experiment', 'controller'], sort=False):
+    for (reg, exp, ctrl), g in df.groupby(['regime', 'experiment', 'controller'], sort=False):
         ok = g['rmse'] < 5
         s = g[ok]
-        rows.append({'experiment': exp, 'controller': ctrl, 'n': len(g),
+        rows.append({'regime': reg, 'experiment': exp, 'controller': ctrl, 'n': len(g),
                      'success_%': 100 * ok.mean(),
                      'rmse': f"{s.rmse.mean():.4f} ± {s.rmse.std():.4f}",
                      'rmse>1s': f"{s.rmse_after1s.mean():.4f} ± {s.rmse_after1s.std():.4f}",
@@ -258,6 +279,7 @@ def main():
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--trajectory', default='random')
     ap.add_argument('--workers', type=int, default=24)
+    ap.add_argument('--regimes', nargs='+', default=['base'])
     ap.add_argument('--out', default=os.path.join(REPO, 'icon_mpc', 'results', 'headroom.csv'))
     args = ap.parse_args()
     _init_worker()
@@ -276,7 +298,7 @@ def main():
             with mp.get_context('spawn').Pool(args.workers, initializer=_init_worker) as pool:
                 list(pool.imap_unordered(prebuild_task, pre))
 
-    tasks = [(e, c, i, args.num_trials, args.seed, args.trajectory)
+    tasks = [(e, c, i, args.num_trials, args.seed, args.trajectory, r) for r in args.regimes
              for e in args.experiments for c in args.controllers for i in range(args.num_trials)]
     print(f'{len(tasks)} rollouts on {args.workers} workers')
     rows, t0 = [], time.time()
@@ -293,14 +315,14 @@ def main():
                 exp, ctrl, i = futs[f][:3]
                 r = {'rmse': np.inf, 'rmse_after1s': np.inf, 'max_err': np.inf,
                      'heading_deg': np.nan, 'heading_wrapped_deg': np.nan, 'cmd_rate': np.nan,
-                     'error': f'worker: {e!r}'[:200], 'experiment': exp, 'controller': ctrl,
+                     'error': f'worker: {e!r}'[:200], 'regime': futs[f][6], 'experiment': exp, 'controller': ctrl,
                      'trial': i, 'wall_s': np.nan, 'solve_ms': np.nan}
                 print(f'  FAILED {exp}/{ctrl}/{i}: {e!r}', flush=True)
             rows.append(r)
             if (k + 1) % max(1, len(tasks) // 20) == 0:
                 print(f'  {k + 1}/{len(tasks)}  ({time.time() - t0:.0f}s)', flush=True)
                 pd.DataFrame(rows).to_csv(args.out.replace('.csv', '_partial.csv'), index=False)
-    df = pd.DataFrame(rows).sort_values(['experiment', 'controller', 'trial'])
+    df = pd.DataFrame(rows).sort_values(['regime', 'experiment', 'controller', 'trial'])
     df.to_csv(args.out, index=False)
     summ = summarize(df)
     summ.to_csv(args.out.replace('.csv', '_summary.csv'), index=False)
