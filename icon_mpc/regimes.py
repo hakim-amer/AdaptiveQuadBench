@@ -14,6 +14,7 @@ controllers and do not disturb the benchmark's own random stream (motor noise et
     lat20/lat50 : 20 / 50 ms actuation latency
     lat_rand    : per-trial latency ~ U(0, 60 ms)
     combo       : noise + lat20 + aggr + rotor_fault
+    mix         : per-trial random combination (noise scale, latency, aggr, fault, gust); training only
 """
 
 from collections import deque
@@ -35,11 +36,32 @@ REGIMES = {
     'lat50': {'latency': 0.05},
     'lat_rand': {'latency': 'random'},  # per-trial latency ~ U(0, 60 ms), unknown to the controller
     'combo': {'noise': 1.0, 'latency': 0.02, 'aggressive': True, 'rotor_fault': True},
+    'mix': {'mix': True},
 }
 
 
-def trajectory_kind(regime, trajectory):
-    return 'aggressive' if REGIMES[regime].get('aggressive') and trajectory == 'random' else trajectory
+def spec_for(regime, i):
+    """Concrete regime spec for trial i ('mix' draws a random combination per trial)."""
+    spec = REGIMES[regime]
+    if not spec.get('mix'):
+        return spec
+    rng = np.random.default_rng(400000 + i)
+    out = {}
+    if rng.random() < 0.75:
+        out['noise'] = float(rng.uniform(0.3, 3.0))
+    if rng.random() < 0.5:
+        out['latency'] = float(rng.uniform(0.0, 0.04))
+    if rng.random() < 0.5:
+        out['aggressive'] = True
+    if rng.random() < 0.5:
+        out['rotor_fault'] = True
+    if rng.random() < 0.3:
+        out['gust_front'] = True
+    return out
+
+
+def trajectory_kind(spec, trajectory):
+    return 'aggressive' if spec.get('aggressive') and trajectory == 'random' else trajectory
 
 
 def fault_spec(i):

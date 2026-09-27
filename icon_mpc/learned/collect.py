@@ -21,7 +21,8 @@ BEHAVIOUR = ['nmpc+kf[q_F=10,r_v=0.05,r_w=0.05,q_tau=0.1,filt=1]',
              'nmpc+kf[q_F=10,r_v=0.15,r_w=0.15,q_tau=0.1,filt=1]',
              'nmpc+kf[q_F=1,r_v=0.15,r_w=0.15,q_tau=0.1,filt=1]',
              'nmpc+kf[q_F=30,r_v=0.001,r_w=0.001,q_tau=0.3,filt=1]']
-NOISY = ('noise', 'noise_hi', 'combo')
+NOISY = ('noise', 'noise_hi', 'combo', 'mix')
+LATENT = ('lat20', 'lat50', 'lat_rand', 'combo', 'mix')  # behaviour policy identifies the delay online
 SEQ_LEN = 500
 
 
@@ -30,7 +31,8 @@ def behaviour_for(regime, i, policy=None):
         return policy
     # the fast (low-R) KF destabilises the NMPC under sensor noise; skip it there
     pool = BEHAVIOUR[:3] if regime in NOISY else BEHAVIOUR
-    return pool[i % len(pool)]
+    b = pool[i % len(pool)]
+    return b[:-1] + ',delay=id]' if regime in LATENT else b
 
 
 def main():

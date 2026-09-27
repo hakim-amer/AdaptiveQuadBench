@@ -179,9 +179,9 @@ def run_task(task):
     from run_eval import switch_controller
     from icon_mpc.oracle_controller import OracleNMPC, Privileged
     from icon_mpc import regimes as R
-    spec = R.REGIMES[regime]
+    spec = R.spec_for(regime, i)
 
-    c = get_components(experiment, num_trials, seed, R.trajectory_kind(regime, trajectory))
+    c = get_components(experiment, num_trials, seed, R.trajectory_kind(spec, trajectory))
     vehicle = copy.deepcopy(c['vehicles'][i])
     traj = c['trajectories'][i]
     wind_seq = c['wind_seqs'][i]
@@ -198,6 +198,8 @@ def run_task(task):
         # e.g. nmpc+kf[q_F=10,filt=1,delay=0.02], nmpc+dist[delay=0.02]
         level, args_s = ctrl_name[5:-1].split('[')
         kw = {k: _num(v) for k, v in (a.split('=') for a in args_s.split(','))}
+        if kw.get('delay') == 'true':  # privileged: this trial's true actuation latency
+            kw['delay'] = R.latency_of(spec.get('latency') or 0.0, i)
         priv = Privileged(vehicle, wind_seq, ext_f, ext_t, toggles, SIM_DT)
         controller = OracleNMPC(cparams, level=level, privileged=priv, kf_kwargs=kw)
     elif ctrl_name in ORACLES:

@@ -89,3 +89,33 @@ class LumpedKF:
 
     def estimate(self):
         return self.z[6:9].copy(), self.z[9:12].copy()
+
+
+class DelayID:
+    """Classical actuation-latency identifier (multiple-hypothesis, rotor-speed based).
+
+    For each candidate delay d (in steps) predict the measured rotor speeds with the first-order
+    motor model driven by the command issued d steps earlier, and keep an exponentially-forgotten
+    squared prediction error; the estimate is the arg-min hypothesis. Needs rotor-speed feedback.
+    """
+
+    def __init__(self, dt, tau_m, max_steps=8, forget=0.98):
+        self.a = float(np.exp(-dt / tau_m)) if tau_m else 0.0
+        self.cost = np.zeros(max_steps + 1)
+        self.max_steps, self.forget = max_steps, forget
+        self.prev = None
+        self.d = 0
+
+    def update(self, omega_meas, cmd_speed_hist):
+        """omega_meas: measured rotor speeds now; cmd_speed_hist: issued rotor-speed commands,
+        newest last (the newest was issued one step ago). Returns the delay estimate in steps."""
+        om = np.asarray(omega_meas, float)
+        if self.prev is not None:
+            n = len(cmd_speed_hist)
+            for d in range(self.max_steps + 1):
+                c = cmd_speed_hist[max(-n, -1 - d)]
+                pred = c + (self.prev - c) * self.a
+                self.cost[d] = self.forget * self.cost[d] + float(np.sum((om - pred) ** 2))
+            self.d = int(np.argmin(self.cost))
+        self.prev = om
+        return self.d

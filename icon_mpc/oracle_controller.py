@@ -109,11 +109,21 @@ class OracleNMPC(MultirotorControlTemplate):
         aero = bool(kf_kwargs.pop('aero', level != 'nominal'))
         # delay (s): known actuation latency -> KF uses the command actually applied and the NMPC
         # predicts the state forward over the delay; filt: feed KF-filtered v, w to the NMPC.
-        self.delay_steps = int(round(kf_kwargs.pop('delay', 0.0) / sim_dt))
+        # delay='id': unknown latency, identified online from rotor-speed feedback (DelayID)
+        delay = kf_kwargs.pop('delay', 0.0)
+        self.delay_id = None
+        if delay == 'id':
+            from icon_mpc.estimators import DelayID
+            self.delay_id = DelayID(sim_dt, ctrl_params.get('tau_m'), max_steps=int(kf_kwargs.pop('max_delay', 8)))
+            self.delay_steps = 0
+            hist_len = self.delay_id.max_steps + 1
+        else:
+            self.delay_steps = int(round(delay / sim_dt))
+            hist_len = self.delay_steps + 1
         self.filt = int(kf_kwargs.pop('filt', 0))
-        self.cmd_hist = deque(maxlen=self.delay_steps + 1)
+        self.cmd_hist = deque(maxlen=hist_len)
         self._f = None
-        if self.delay_steps:
+        if self.delay_steps or self.delay_id is not None:
             from icon_mpc.nmpc import build_model
             import casadi as cs
             mdl = build_model('icon_pred_model')
@@ -122,6 +132,9 @@ class OracleNMPC(MultirotorControlTemplate):
         self.trajectory = None
         self.step = 0
         self.u = np.full(4, ctrl_params['mass'] * GRAV / 4)
+        self.delay_log = []
+        if self.delay_id is not None:
+            self.cmd_hist.extend([self.u.copy()] * hist_len)
         self.solve_times = []
         self.kf = None
         if level == 'kf':
@@ -173,7 +186,11 @@ class OracleNMPC(MultirotorControlTemplate):
 
     def update(self, t, state, flat_output):
         # command applied over the last step = issued delay_steps before it
-        applied = self.cmd_hist[0] if self.cmd_hist else None
+        if self.delay_id is not None:
+            self.delay_steps = self.delay_id.update(
+                state['rotor_speeds'], [np.sqrt(c / self.k_eta_ctrl) for c in self.cmd_hist])
+            self.delay_log.append(self.delay_steps)
+        applied = self.cmd_hist[max(-len(self.cmd_hist), -1 - self.delay_steps)] if self.cmd_hist else None
         omega_cmd_prev = np.sqrt(applied / self.k_eta_ctrl) if applied is not None else None
         if self.record is not None:
             self.record.append(({k: np.array(state[k], float) for k in ('x', 'v', 'q', 'w', 'rotor_speeds')},
