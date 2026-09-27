@@ -229,9 +229,22 @@ class ParamNMPCSolver:
         status = s.solve()
         u = s.get(0, 'u')
         self.n_solves += 1
-        if status not in (0, 2) or not np.all(np.isfinite(u)):
-            # A failed QP leaves corrupted iterates that can make the next solve hang.
+        # SQP-RTI can report success with an exploded predicted trajectory (QP hit its iteration
+        # cap); warm-starting from such iterates makes the next HPIPM call hang forever.
+        X = np.stack([s.get(k, 'x') for k in range(self.N + 1)])
+        bad_traj = (not np.all(np.isfinite(X)) or np.abs(X).max() > 1e3
+                    or np.abs(np.linalg.norm(X[:, 6:10], axis=1) - 1).max() > 0.5)
+        if status not in (0, 2) or not np.all(np.isfinite(u)) or bad_traj:
             self.n_fail += 1
-            s.reset()
+            self.cold_start(x0)
             u = np.full(4, np.nan)
         return u, s.get_stats('time_tot')
+
+    def cold_start(self, x0):
+        """Reset solver memory and initialise iterates at x0 / hover-ish thrust (not zeros)."""
+        s = self.solver
+        s.reset()
+        for k in range(self.N + 1):
+            s.set(k, 'x', x0)
+        for k in range(self.N):
+            s.set(k, 'u', np.full(4, 0.25 * self.f_max))
