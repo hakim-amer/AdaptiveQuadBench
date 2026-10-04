@@ -164,10 +164,12 @@ class OracleNMPC(MultirotorControlTemplate):
             # safe aggregation (G4): robust KF, fast KF and (optionally) the learned estimator
             from icon_mpc.estimators import LumpedKF, SafeAggregator
             tm = ctrl_params.get('tau_m')
+            qt = float(kf_kwargs.pop('q_tau', 0.1))
             experts = [LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, tau_m=tm,
-                                r_v=0.15, r_w=0.15, q_F=10, q_tau=0.1),
-                       LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, tau_m=tm,
-                                r_v=0.05, r_w=0.05, q_F=10, q_tau=0.1)]
+                                r_v=0.15, r_w=0.15, q_F=10, q_tau=qt)]
+            if int(kf_kwargs.pop('fast', 1)):  # fast KF expert (unstable under heavy sensor noise)
+                experts.append(LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, tau_m=tm,
+                                        r_v=0.05, r_w=0.05, q_F=10, q_tau=qt))
             if 'model' in kf_kwargs:
                 from icon_mpc.learned.estimator import LearnedEstimator
                 experts.append(LearnedEstimator(self.p_nom, self.k_eta_ctrl, dt=sim_dt, tau_m=tm,

@@ -33,10 +33,10 @@ class GatedDeltaBlock(nn.Module):
         self.onorm = nn.LayerNorm(d_head)
         self.out_proj = nn.Linear(d_inner, d_model)
 
-    def _gates(self, xn):
+    def _gates(self, xn, log=False):
         a, b = self.ab(xn).split(self.h, dim=-1)
         log_alpha = -F.softplus(a) * torch.exp(self.A_log)  # (.., H) <= 0
-        return torch.exp(log_alpha), torch.sigmoid(b)
+        return (log_alpha if log else torch.exp(log_alpha)), torch.sigmoid(b)
 
     def _qkv(self, c):
         q, k, v = c.split(self.d_inner, dim=-1)
@@ -56,18 +56,67 @@ class GatedDeltaBlock(nn.Module):
         S = alpha[..., None, None] * (S + torch.einsum('bhv,bhk->bhvk', beta[..., None] * (v - Sk), k))
         return S, torch.einsum('bhvk,bhk->bhv', S, q)
 
-    def forward(self, x):
+    chunk = 64
+
+    def forward(self, x, sequential=False):
         B, T, _ = x.shape
         xn = self.norm(x)
         c = F.silu(self.conv(self.qkv(xn).transpose(1, 2))[..., :T].transpose(1, 2))
         q, k, v = self._qkv(c)
-        alpha, beta = self._gates(xn)
-        S = x.new_zeros(B, self.h, self.dk, self.dk)
+        if sequential:  # reference implementation (one recurrence step per time step)
+            alpha, beta = self._gates(xn)
+            S = x.new_zeros(B, self.h, self.dk, self.dk)
+            outs = []
+            for t in range(T):
+                S, o = self._rec(S, q[:, t], k[:, t], v[:, t], alpha[:, t], beta[:, t])
+                outs.append(o)
+            return self._out(x, xn, torch.stack(outs, 1))
+        log_alpha, beta = self._gates(xn, log=True)
+        return self._out(x, xn, self._chunked(q, k, v, log_alpha, beta))
+
+    def _chunked(self, q, k, v, log_alpha, beta):
+        """Exact chunk-parallel form of S_t = a_t (S_{t-1} + b_t (v_t - S_{t-1} k_t) k_t^T).
+
+        Within a chunk with start state S0 and G_t = sum_{i<=t} log a_i (G_0 = 0):
+            w_i + b_i sum_{j<i} e^{G_{i-1}-G_{j-1}} (k_i.k_j) w_j = b_i (v_i - e^{G_{i-1}} S0 k_i)
+            o_t = e^{G_t} S0 q_t + sum_{i<=t} e^{G_t-G_{i-1}} (k_i.q_t) w_i
+            S_C = e^{G_C} S0 + sum_i e^{G_C-G_{i-1}} w_i k_i^T
+        (all decay ratios <= 1). One unit-lower-triangular solve per chunk replaces C steps."""
+        B, T, H, d = q.shape
+        C = min(self.chunk, T)
+        pad = (-T) % C
+        if pad:  # identity steps: a = 1, b = 0
+            q, k, v = (F.pad(z, (0, 0, 0, 0, 0, pad)) for z in (q, k, v))
+            log_alpha, beta = F.pad(log_alpha, (0, 0, 0, pad)), F.pad(beta, (0, 0, 0, pad))
+        n = (T + pad) // C
+        # (B, H, n, C, d) / (B, H, n, C)
+        q, k, v = (z.reshape(B, n, C, H, d).permute(0, 3, 1, 2, 4) for z in (q, k, v))
+        la = log_alpha.reshape(B, n, C, H).permute(0, 3, 1, 2)
+        b = beta.reshape(B, n, C, H).permute(0, 3, 1, 2)
+        G = la.cumsum(-1)                       # G_t
+        Gp = G - la                             # G_{t-1}
+        idx = torch.arange(C, device=q.device)
+        strict = idx[:, None] > idx[None, :]
+        causal = idx[:, None] >= idx[None, :]
+        # A_ij = b_i e^{G_{i-1} - G_{j-1}} k_i.k_j  (j < i)
+        dA = (Gp[..., :, None] - Gp[..., None, :]).masked_fill(~strict, -float('inf'))
+        A = b[..., None] * torch.exp(dA) * (k @ k.transpose(-1, -2))
+        L = torch.eye(C, device=q.device, dtype=q.dtype) + A
+        # decays for outputs: e^{G_t - G_{i-1}}, i <= t
+        dO = (G[..., :, None] - Gp[..., None, :]).masked_fill(~causal, -float('inf'))
+        Dqk = torch.exp(dO) * (q @ k.transpose(-1, -2))          # (B,H,n,C,C)
+        eG, eGp = torch.exp(G)[..., None], torch.exp(Gp)[..., None]
+        eGC = torch.exp(G[..., -1:, None] - Gp[..., :, None])     # e^{G_C - G_{i-1}}
+        S = q.new_zeros(B, H, d, d)
         outs = []
-        for t in range(T):
-            S, o = self._rec(S, q[:, t], k[:, t], v[:, t], alpha[:, t], beta[:, t])
+        for j in range(n):
+            rhs = b[:, :, j, :, None] * (v[:, :, j] - eGp[:, :, j] * (k[:, :, j] @ S.transpose(-1, -2)))
+            w = torch.linalg.solve_triangular(L[:, :, j], rhs, upper=False, unitriangular=True)
+            o = eG[:, :, j] * (q[:, :, j] @ S.transpose(-1, -2)) + Dqk[:, :, j] @ w
             outs.append(o)
-        return self._out(x, xn, torch.stack(outs, 1))
+            S = torch.exp(G[:, :, j, -1])[..., None, None] * S + (eGC[:, :, j] * w).transpose(-1, -2) @ k[:, :, j]
+        o = torch.stack(outs, 2)                                  # (B,H,n,C,d)
+        return o.permute(0, 2, 3, 1, 4).reshape(B, n * C, H, d)[:, :T]
 
     def init_state(self, batch, device=None):
         device = device or self.A_log.device
