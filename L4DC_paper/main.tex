@@ -1,0 +1,50 @@
+% ============================================================================
+%  ICON-MPC -- L4DC 2026 submission
+%  Build:  tectonic main.tex     (or: latexmk -pdf main.tex)
+%  Use \documentclass[final]{l4dc2026} for the camera-ready version.
+% ============================================================================
+\documentclass[anon]{l4dc2026}
+
+% amsmath, amssymb, natbib, graphicx, url, algorithm2e are loaded by the class
+\usepackage{times}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,calc,shapes.geometric}
+
+\input{macros}
+
+\title[ICON-MPC: In-Context Disturbance Estimation for Safe Quadrotor NMPC]{ICON-MPC: In-Context Disturbance Estimation with Gated Delta Networks for Robust, Adaptive and Safe Quadrotor NMPC}
+
+\author{%
+ \Name{Hakim Amer} \Email{hakim.amer@nestai.com}\\
+ \addr NestAI
+}
+
+\begin{document}
+
+\maketitle
+
+\input{sections/00_abstract}
+
+\input{sections/01_introduction}
+\input{sections/02_related_work}
+\input{sections/03_problem_setup}
+\input{sections/04_method}
+\input{sections/05_guarantees}
+\input{sections/06_experiments}
+\input{sections/07_discussion}
+\input{sections/08_conclusion}
+
+% \acks{Acknowledgements are hidden in the anonymous version.}
+
+\bibliography{references}
+
+\clearpage
+\appendix
+\input{sections/A_proofs}
+\input{sections/B_implementation}
+\input{sections/C_additional_results}
+
+\end{document}

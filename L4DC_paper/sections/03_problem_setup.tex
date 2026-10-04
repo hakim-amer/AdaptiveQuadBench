@@ -1,0 +1,22 @@
+\section{Problem Setup}
+\label{sec:setup}
+
+\paragraph{Dynamics.}
+The state is $x=(p,v,q,\omega)\in\R^{13}$: position, velocity, unit quaternion and body rate. The input $u\in[0,f_{\max}]^4$ is the vector of rotor thrusts.
+We discretise with step $h=10$\,ms and write the plant as
+\begin{equation}
+  x_{t+1} = f_\theta(x_t,u_t) + G\, d_t, \qquad d_t = \big(F_t/m,\; J^{-1}\tau_t\big)\in\R^6.
+  \label{eq:plant}
+\end{equation}
+Here $f_\theta$ is the rigid-body model with rotor drag \citep{faessler2018differential,folk2023rotorpy} at nominal parameters $\theta$; the lumped disturbance $d_t$, injected by $G$ into the velocity and body-rate equations, collects \emph{everything else} (wind, external wrench, payload, rotor loss, parameter error).
+The controller observes $y_t = \mathcal{S}_t(x_t)$, where the sensing channel $\mathcal{S}_t$ may add Gaussian or heavy-tailed noise, outliers or impacts, or return stale packets (\S\ref{sec:exp-setup}).
+Given $y_{1:t}$ and $u_{1:t-1}$, the one-step physics residual
+\begin{equation}
+  r_t = G^{\dagger}\big(y_{t+1} - f_\theta(y_t,u_t)\big) = d_t + \nu_t
+  \label{eq:residual}
+\end{equation}
+is observable. Here $G^\dagger$ is the left inverse of $G$ and $\nu_t$ collects measurement-noise terms; it is zero-mean under unbiased sensing.
+
+\paragraph{Objective.}
+Track a reference $x^{\mathrm{ref}}_t$ with minimal position error $\varepsilon_t = p_t - p^{\mathrm{ref}}_t$. In obstacle scenarios, the controller must also keep the vehicle outside vertical cylinders $\mathcal{O}_j=\{p:\norm{p_{xy}-c_j}\le r_j\}$, where $r_j$ already includes the body radius. Keep-out holds when the clearance satisfies $\min_j(\norm{p_{xy,t}-c_j}-r_j)\ge 0$ for all $t$.
+We call a trial \emph{unsafe} if it collides or fails to track (RMSE above 1\,m or divergence).

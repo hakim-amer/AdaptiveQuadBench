@@ -1,0 +1,21 @@
+\section{Introduction}
+\label{sec:intro}
+
+Agile quadrotors operate under disturbances that are hard to model: wind and gusts, payload changes, degraded rotors, unmodelled aerodynamics and contact. Their sensing is also imperfect, with noisy, delayed, dropped or corrupted state estimates.
+Two families of controllers dominate. \emph{Adaptive} controllers such as $\mathcal{L}_1$ \citep{hovakimyan2010l1,wu2023l1quad} and INDI \citep{smeur2016adaptive,tal2021accurate} react quickly to a lumped disturbance. However, they act on a single step and ignore constraints. \emph{Model predictive} controllers \citep{sun2022comparative,hanover2022performance,torrente2021data,salzmann2023neuralmpc} plan over a horizon and enforce constraints, but their performance hinges on the disturbance estimate fed to the prediction model. This is the classical offset-free MPC architecture \citep{pannocchia2003disturbance,maeder2009linear}.
+
+\paragraph{When can learning beat a Kalman filter?}
+If the plant is linear, the noise Gaussian and the disturbance a known Gauss--Markov process, the Kalman filter (KF) with certainty-equivalent control is optimal (LQG separation). No learned estimator can then do better.
+A learned estimator can only win by exploiting violations of these assumptions. Three violations matter here: (i) the operating condition is a \emph{mixture} of regimes with different statistics, so the Bayes estimator is a nonlinear, regime-weighted combination; (ii) the noise is heavy-tailed or contains outliers and dropouts; (iii) the disturbance depends on state and input (e.g., rotor-effectiveness loss scales with thrust), so it is better treated as an unknown \emph{parameter} than as a lumped signal. Here KFs, multiple-model \citep{magill1965optimal,blom1988imm} and outlier-robust KFs \citep{ting2007kalman} must trade one regime against another.
+
+\paragraph{Approach.}
+We keep everything that is known exactly and learn only what is not: the NMPC uses the full rigid-body model with rotor drag \citep{faessler2018differential}; a \emph{learning-free} front end handles stale packets, outliers and state jumps; and a sequence model performs \emph{in-context} estimation of the lumped disturbance and the filtered state from physics residuals, as a correction on top of a KF bank.
+For the sequence model we use the Gated Delta Network (GDN) \citep{yang2025gated}. We prove that its error-correcting (delta) update is normalised LMS with forgetting, the textbook recursive identification rule, which diagonal state-space models \citep{gu2023mamba} cannot implement; we compare both empirically.
+For safety under state constraints, we tighten keep-out constraints by an online \emph{adaptive conformal} margin \citep{gibbs2021adaptive} on the plan-prediction error. The margin carries a distribution-free long-run guarantee.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item \textbf{Method.} \ours{}: a real-time (${\approx}4$\,ms per step on one CPU thread) offset-free NMPC with an in-context GDN disturbance-and-state estimator, a robust front end and an adaptive conformal safety margin (\S\ref{sec:method}).
+  \item \textbf{Guarantees.} (i) the gated delta rule \emph{is} NLMS system identification with forgetting, which diagonal recurrences cannot implement; (ii) a multi-scale low-pass loss upper-bounds closed-loop tracking error; (iii) a distribution-free bound on the long-run frequency of conformal misses and hence of constraint violations (\S\ref{sec:guarantees}).
+  \item \textbf{Evidence.} A paired study on AdaptiveQuadBench \citep{zhang2025adaptivequadbench} (1120 trials per controller) against 7 stock and 2 strengthened baselines, plus obstacle scenarios with state constraints and ablations (\S\ref{sec:experiments}). We report where we do \emph{not} win.
+\end{enumerate}

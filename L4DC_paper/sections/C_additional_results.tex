@@ -1,0 +1,62 @@
+\section{Additional Results}
+\label{app:results}
+
+\begin{table}[h]
+  \centering\small
+  \caption{\ours{} (GDN) against the best \emph{strengthened} baseline per regime (same NMPC, front end and input target; only the estimator differs). Gain $=$ median RMSE ratio; one-sided Wilcoxon on 140 paired trials.}
+  \label{tab:strong}
+  \input{tables/strong_baselines}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\linewidth]{figures/tracking_results.pdf}
+  \vspace{-6mm}
+  \caption{Median position RMSE (log scale; whiskers show the inter-quartile range) over 140 paired trials per regime. Grey: best of the seven stock controllers, whose name is shown above the bar. Orange/purple: our strengthened NMPC baselines. Blue/green: \ours{} with Mamba and with GDN estimators.}
+  \label{fig:tracking}
+\end{figure}
+
+\begin{table}[h]
+  \centering\small
+  \caption{Obstacle scenarios (140 paired trials each): unsafe-trial rate, median RMSE [cm] and an exact one-sided McNemar test of ``baseline is less safe than \ours{}''.}
+  \label{tab:obstacles}
+  \input{tables/obstacles}
+\end{table}
+
+\paragraph{Ablation and compute.}
+Tables~\ref{tab:ablation} and~\ref{tab:compute} support \S\ref{sec:ablation} and the compute paragraph of \S\ref{sec:exp-tracking}.
+
+\begin{table}[h]
+  \centering\small
+  \caption{Ablation: median RMSE [cm] (140 paired trials per regime; superscript gives the success rate when below 100\%). Upper block: adding components cumulatively. Lower block: removing one component from the full model. All learned rows use training seed 0.}
+  \label{tab:ablation}
+  \resizebox{\linewidth}{!}{\input{tables/ablation}}
+\end{table}
+
+\begin{table}[h]
+  \centering\small
+  \caption{Controller compute per 100\,Hz step (single CPU thread; 30 trials run in parallel) and outcome under stress.}
+  \label{tab:compute}
+  \input{tables/compute}
+\end{table}
+
+\paragraph{Training-seed variability.}
+Table~\ref{tab:seeds} lists the median RMSE of each training seed. Seed-to-seed variation (up to 15\% under stress) is comparable to the gap between the two selective architectures.
+
+\begin{table}[h]
+  \centering\small
+  \caption{Median position RMSE [cm] per training seed (140 paired trials per regime).}
+  \label{tab:seeds}
+  \input{tables/seeds}
+\end{table}
+
+\paragraph{Qualitative 3D rollouts.}
+Figure~\ref{fig:snapshots} shows two stress trials (all faults combined). Animated versions are provided in the supplementary material.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=\linewidth]{figures/snapshot_tracking.png}\\[2mm]
+  \includegraphics[width=\linewidth]{figures/snapshot_safety.png}
+  \caption{\emph{Top:} external force plus stress. \ours{} (green) tracks with 4.1\,cm RMSE, against 15.9--52.0\,cm for the stock MPC, $\mathcal{L}_1$-MPC, INDI-A and XAdap. \emph{Bottom:} wind plus stress, with obstacles intruding into the path (red crosses mark collisions). The stock MPC spends 1.05\,s in collision and the constrained KF-NMPC without a margin 0.42\,s. \ours{} with the conformal margin never collides, with 8.4\,cm RMSE.}
+  \label{fig:snapshots}
+\end{figure}

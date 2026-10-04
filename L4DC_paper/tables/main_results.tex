@@ -1,0 +1,16 @@
+\begin{tabular}{l l r r r r r r r}
+\toprule
+ & \multicolumn{2}{c}{Best stock controller} & NMPC+ & NMPC+ & \multicolumn{2}{c}{\textbf{ICON-MPC (ours)}} & \multicolumn{2}{c}{GDN vs.\ best stock} \\
+\cmidrule(lr){2-3}\cmidrule(lr){6-7}\cmidrule(lr){8-9}
+Regime & name & RMSE & rob.\ KF & MMAE & Mamba & GDN & gain & wins \\
+\midrule
+Base & INDI-A & 3.18 & 0.52 & \textbf{0.40} & 0.41 & 0.46 & 7.0$\times$ & 140/140 \\
+Gauss.\ noise & L1-MPC & 3.92 & 1.00 & 1.65 & \textbf{0.91} & 0.97 & 4.1$\times$ & 140/140 \\
+Heavy-tail & L1-MPC & 4.50 & 0.98 & 1.26 & \textbf{0.84} & 0.91 & 4.9$\times$ & 140/140 \\
+Outliers & XAdap & 6.32 & 1.19 & 1.68 & \textbf{1.15} & 1.18 & 5.3$\times$ & 140/140 \\
+Dropout & Geo-adaptive & 12.12$^{\,99\%}$ & 2.31 & 3.60 & \textbf{1.77} & 1.83 & 6.6$\times$ & 140/140 \\
+Rotor flicker & INDI-A & 3.64 & 1.11 & 1.11 & \textbf{0.63} & 0.74 & 5.0$\times$ & 140/140 \\
+Impacts & MPC & 9.95 & \textbf{5.92$^{\,95\%}$} & 6.00 & 6.52 & 7.04 & 1.4$\times$ & 124/140 \\
+Stress (all) & XAdap & 59.30$^{\,73\%}$ & 11.06$^{\,92\%}$ & 11.25$^{\,96\%}$ & 10.36 & \textbf{10.00$^{\,99\%}$} & 5.9$\times$ & 138/140 \\
+\bottomrule
+\end{tabular}

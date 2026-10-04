@@ -1,0 +1,52 @@
+\section{Guarantees}
+\label{sec:guarantees}
+
+We give three results: one on the estimator class, one on the training objective and one on safety. Proofs are in App.~\ref{app:proofs}. Throughout, $\norm{k_t}=1$.
+
+\subsection{The gated delta rule is in-context system identification}
+
+\begin{proposition}[GDN $=$ NLMS with forgetting]
+\label{prop:nlms}
+Consider the online least-squares problem of predicting $v_t$ from the regressor $k_t$ with a linear map $S$, with instantaneous loss $\ell_t(S)=\tfrac12\norm{v_t-Sk_t}^2$.
+\begin{enumerate}
+  \item[(a)] The gated delta update \eqref{eq:gdn} is exactly one normalised-LMS (Kaczmarz) step with step size $\beta_t$ on $\ell_t$, applied to the forgotten estimate $\alpha_t S_{t-1}$:
+  \[
+    S_t=\alpha_t S_{t-1}-\beta_t\nabla\ell_t(\alpha_t S_{t-1}) = \alpha_t S_{t-1}+\beta_t\big(v_t-\alpha_t S_{t-1}k_t\big)k_t^{\T}.
+  \]
+  In particular, for a linear-in-parameter disturbance channel $d_t=\varphi_t^{\T}\vartheta_t$ observed through the residual $r_t$, choosing $k_t=\varphi_t/\norm{\varphi_t}$ and $v_t=r_t/\norm{\varphi_t}$ makes the row vector $S_t$ the normalised-LMS estimate of $\vartheta_t^{\T}$ with forgetting factor $\alpha_t$ \citep{widrow1960adaptive}.
+  \item[(b)] Let the state of a recurrence be a linear embedding of $S$. If two keys $k,k'$ are neither parallel nor orthogonal and $\beta,\beta'\in(0,1]$, the transitions $A=I-\beta kk^{\T}$ and $A'=I-\beta'k'k'^{\T}$ do not commute. Hence no fixed change of coordinates makes all delta-rule transitions diagonal. Diagonal selective SSMs, whose transitions $\mathrm{diag}(a_t)$ always commute, therefore cannot implement \eqref{eq:gdn} in any linear embedding.
+\end{enumerate}
+\end{proposition}
+Rotor-effectiveness loss, mass/inertia errors and drag make $d_t$ linear in unknown parameters with regressors from rotor speeds and velocity (part of our features). A GDN layer can thus identify them in its state, with input-dependent forgetting $\alpha_t$ (fast re-identification after a fault) and step size $\beta_t$ (slow adaptation under noise): the two knobs a fixed-gain KF lacks.
+
+\subsection{A training loss that upper-bounds closed-loop tracking error}
+Let $\etil_t=d_t-\dhat_t$. We assume that, around the reference, the nominal NMPC closed loop is locally exponentially stable (standard with terminal ingredients or a sufficiently long horizon), hence locally input-to-state stable with respect to $\etil$ \citep{sontag2008input}. To first order, the tracking error is the output of a stable, linear time-invariant (LTI), multiple-input multiple-output (MIMO) filter, $\varepsilon=T(z)\,\etil$. Because position is a double integrator of acceleration, $T$ is low-pass. Let $H_w(\omega)=\frac{\sin(w\omega/2)}{w\sin(\omega/2)}$ be the frequency response of $\mathrm{MA}_w$, with $H_1\equiv 1$.
+
+\begin{theorem}[Multi-scale loss bound]
+\label{thm:ms}
+Let $\etil$ be wide-sense stationary and let $\lambda_1>0$, $\lambda_w\ge 0$. Then
+\begin{equation}
+  \E\norm{\varepsilon_t}^2 \;\le\; c_\lambda\Big(\lambda_1\,\E\norm{\etil_t}^2+\textstyle\sum_{w>1}\lambda_w\,\E\norm{\mathrm{MA}_w(\etil)_t}^2\Big),
+  \qquad
+  c_\lambda=\sup_{\omega\in[0,\pi]}\frac{\norm{T(e^{i\omega})}_2^2}{\lambda_1+\sum_{w>1}\lambda_w|H_w(\omega)|^2}.
+  \label{eq:msbound}
+\end{equation}
+For per-step MSE alone ($\lambda_w=0$ for $w>1$), $c_\lambda=\norm{T}_{\mathcal{H}_\infty}^2/\lambda_1$, attained at low frequency. Adding low-pass terms reduces $c_\lambda$ by up to a factor $1+\sum_{w>1}\lambda_w/\lambda_1$ at the frequencies where $\norm{T}$ peaks.
+\end{theorem}
+This explains why estimators with lower per-step error can track \emph{worse}: slow bias hurts tracking but is barely penalised by per-step MSE. Our loss \eqref{eq:loss} is exactly of the form \eqref{eq:msbound}: the likelihood term plays the role of $\lambda_1$ and $w\in\{10,25,50\}$ cover the closed-loop bandwidth.
+
+\subsection{Distribution-free safety from adaptive conformal margins}
+
+\begin{theorem}[Long-run miss rate]
+\label{thm:aci}
+Run \eqref{eq:aci} with any $q_1\ge 0$ on any sequence of scores $e_t\in[0,B]$, which may be chosen adversarially and adaptively. Let $m_t=\1[e_t>q_t]$ and $\bar Q=\max\{q_1,\,B+\gamma(1-\alpha)\}$. Then for every horizon $T$,
+\begin{equation}
+  \frac1T\sum_{t=1}^T m_t \;\le\; \alpha+\frac{\bar Q}{\gamma T}.
+\end{equation}
+\end{theorem}
+\begin{corollary}[Constraint-violation frequency]
+\label{cor:safety}
+Suppose the plan computed at time $s=t-\ell$ has zero slack and its interpolated prediction $\hat p^{(s)}_t$ satisfies $\norm{\hat p^{(s)}_t-c_j}\ge r_j+\mu_s$ for all $j$. Then $\min_j\big(\norm{p_{xy,t}-c_j}-r_j\big)\ge\mu_s-e_t$.
+If in addition $\mu_0\ge\ell\gamma(1-\alpha)$, a collision at time $t$ implies a miss $m_t=1$. Consequently, the long-run fraction of time spent in collision is at most $\alpha+\bar Q/(\gamma T)+\rho_{\mathrm{slack}}$, where $\rho_{\mathrm{slack}}$ is the fraction of plans with nonzero slack.
+\end{corollary}
+Theorem~\ref{thm:aci} is a long-run frequency statement, not a per-trial bound; we use $\mu_0=1$\,cm $<\ell\gamma(1-\alpha)$ and report empirical frequencies (App.~\ref{app:proofs}).

@@ -299,6 +299,8 @@ def run_task(task):
              solve_ms=float(np.mean(controller.solve_times) * 1e3) if getattr(controller, 'solve_times', None) else np.nan,
              ctrl_ms=float(np.mean(ctrl_times) * 1e3) if ctrl_times else np.nan,
              ctrl_p99_ms=float(np.percentile(ctrl_times, 99) * 1e3) if ctrl_times else np.nan)
+    if getattr(controller, 'aci_n', 0):
+        m.update(aci_miss=controller.aci_miss / controller.aci_n, aci_n=controller.aci_n)
     return m
 
 

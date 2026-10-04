@@ -1,0 +1,75 @@
+\section{Method: \ours{}}
+\label{sec:method}
+
+\begin{figure}[t]
+  \centering
+  \resizebox{0.98\linewidth}{!}{\input{figures/architecture}}
+  \caption{\ours{} architecture. A learning-free front end cleans the telemetry. A Gated DeltaNet reads physics features (one-step residuals and the outputs of a KF bank) and returns the lumped disturbance $\dhat_t$ and a filtered state $\hat x_t$ to an offset-free NMPC. An adaptive conformal margin $\mu_t$, calibrated online on the realised-vs-planned position error, tightens the keep-out constraints.}
+  \label{fig:architecture}
+\end{figure}
+
+\ours{} (Fig.~\ref{fig:architecture}) has four layers. Each addresses one failure mode and each can be ablated (\S\ref{sec:ablation}).
+
+\subsection{Offset-free nonlinear MPC}
+\label{sec:nmpc}
+At each tick the controller solves
+\begin{equation}
+\begin{aligned}
+  \min_{x_{0:N},u_{0:N-1},s}\ & \textstyle\sum_{k=0}^{N-1}\big(\norm{x_k-x^{\mathrm{ref}}_k}_Q^2+\norm{u_k-u^{\mathrm{ref}}_k}_R^2\big)+\norm{x_N-x^{\mathrm{ref}}_N}_Q^2+\sum_{k,j}\big(z\,s_{kj}+Z\,s_{kj}^2\big)\\
+  \text{s.t.}\ & x_0=\hat x_t,\quad x_{k+1}=F_{\theta}(x_k,u_k;\dhat_t),\quad 0\le u_k\le f_{\max},\\
+  & \norm{p_{xy,k}-c_j}^2 \ge (r_j+\mu_t)^2 - s_{kj},\quad s_{kj}\ge 0,\qquad k=1,\dots,N,
+\end{aligned}
+\label{eq:ocp}
+\end{equation}
+Here $F_\theta$ integrates \eqref{eq:plant} over one shooting interval with the estimated disturbance $\dhat_t$ held constant over the horizon.
+We use a $0.5$\,s horizon with $N=10$ nodes. The solver is acados \citep{verschueren2022acados} with Gauss--Newton SQP-RTI \citep{diehl2005rti}, HPIPM \citep{frison2020hpipm} and explicit Runge--Kutta integration.
+The keep-out constraints are soft with an exact $\ell_1$ penalty \citep{kerrigan2000soft} ($z{=}10^3$, $Z{=}10^4$), so the problem is always feasible. Whenever a feasible plan exists, the slack is zero.
+The input reference $u^{\mathrm{ref}}_k$ is the static rotor allocation of the flatness-based reference wrench minus the estimated disturbance wrench. This is an offset-free input target \citep{pannocchia2003disturbance,maeder2009linear}: under a constant disturbance and a convergent estimator, the steady-state input matches the disturbance and the tracking offset vanishes.
+
+\subsection{Learning-free robust front end}
+Sensor faults are handled \emph{before} any learning, with three rules. \emph{Stale packets} (bit-identical) are flagged, the NMPC dead-reckons $\hat x_t$ with its own model, and estimator kinematics are re-initialised on resume. \emph{Outliers} are rejected when the innovation against the model prediction exceeds $6\times$ a running robust scale plus a floor. \emph{Genuine jumps} (e.g., impacts) are accepted once two consecutive packets agree, followed by a 10-step estimator grace window.
+
+\subsection{In-context disturbance and state estimation with Gated DeltaNet}
+\label{sec:gdn}
+\paragraph{Features and outputs.}
+At each step the network receives a 59-dimensional feature vector $\phi_t$: attitude ($R_t$, 9), velocity (3), body rate (3), rotor speeds (4), the previous normalised input (4), the physics residual $r_t$ of \eqref{eq:residual} (6), kinematic-consistency increments (6), and the outputs of a bank of four lumped KFs (24) tuned for different noise/agility trade-offs.
+It outputs a correction to one member of the bank, $\dhat_t = \dhat^{\mathrm{KF}}_t + \sigma_d\odot c_\vartheta(\phi_{1:t})$, together with a filtered state $\hat x_t$ (position, velocity, body rate and an attitude correction) and per-output log-variances.
+This \emph{residual parametrisation} contains $c_\vartheta\equiv 0$, so in distribution the population-risk minimiser is never worse than the KF it corrects (App.~\ref{app:proofs}).
+
+\paragraph{Gated delta recurrence.}
+Each GDN layer \citep{yang2025gated} maps $\phi_t$ to a key $k_t$ (unit norm), value $v_t$, query $q_t$, decay $\alpha_t\in(0,1)$ and step size $\beta_t\in(0,1)$. It updates a matrix-valued state per head:
+\begin{equation}
+  S_t = \alpha_t\, S_{t-1}\big(I-\beta_t k_t k_t^{\T}\big)+\beta_t v_t k_t^{\T},\qquad o_t = S_t q_t .
+  \label{eq:gdn}
+\end{equation}
+We use two layers, $d_{\mathrm{model}}=64$ and four heads of dimension 16, for 51k parameters in total.
+By Proposition~\ref{prop:nlms}, \eqref{eq:gdn} is normalised LMS with forgetting on $v_t\approx Sk_t$, i.e.\ in-context system identification when keys carry disturbance regressors.
+For training we use the exact chunk-parallel form of \eqref{eq:gdn} \citep{yang2024parallelizing} with chunk length 64, which is $14\times$ faster than the sequential scan. At deployment the network runs recurrently, one step per tick, on one CPU thread.
+
+\paragraph{Control-aware training objective.}
+Labels are privileged simulator quantities: the mean of the next five noise-free one-step residuals for $d$, and the true state for $\hat x$.
+We minimise a heteroscedastic Gaussian negative log-likelihood \citep{kendall2017uncertainties} plus a \emph{multi-scale low-pass} penalty on the error $e_t$:
+\begin{equation}
+  \mathcal{L} = \textstyle\sum_t \tfrac12\big(e_t^{\T}\Sigma_t^{-1}e_t+\log\det\Sigma_t\big)
+  + \lambda \textstyle\sum_{w\in\{10,25,50\}}\sqrt{w}\,\sum_t\norm{\mathrm{MA}_w(e)_t}^2,
+  \label{eq:loss}
+\end{equation}
+where $\mathrm{MA}_w$ is the causal moving average over $w$ steps.
+By Theorem~\ref{thm:ms}, such terms upper-bound closed-loop tracking error, whereas per-step MSE does not.
+The training data are about $10^4$ five-second rollouts of KF-NMPC behaviour policies over a randomised mixture of regimes, plus one round of DAgger \citep{ross2011dagger} with the learned controller in the loop. The seeds and trial indices are disjoint from the evaluation set.
+We train with AdamW \citep{loshchilov2019adamw} and a one-cycle schedule for 40 epochs, three training seeds each. A Mamba \citep{gu2023mamba} and a GRU \citep{cho2014gru} estimator with identical features, outputs and loss serve as architecture controls.
+
+\subsection{Adaptive conformal safety margin}
+\label{sec:aci}
+The NMPC predicts where the vehicle will be, but noise, faults and estimator error make the realised position deviate from the plan.
+Let $\hat p^{(t-\ell)}_{t}$ denote the horizontal position that the plan computed $\ell$ steps earlier predicted for time $t$ (interpolated between nodes; $\ell=10$, two node intervals). The nonconformity score is
+\begin{equation}
+  e_t = \norm{p_{xy,t}-\hat p^{(t-\ell)}_{t}},
+  \qquad
+  q_{t+1} = \max\!\big(0,\; q_t+\gamma\,(\1[e_t>q_t]-\alpha)\big),
+  \qquad
+  \mu_t = \mu_0 + q_t .
+  \label{eq:aci}
+\end{equation}
+This is the quantile-tracking form of adaptive conformal inference \citep{gibbs2021adaptive,angelopoulos2023conformal} with target miss rate $\alpha=0.05$, step size $\gamma=5$\,mm and a floor $\mu_0=1$\,cm.
+The margin $\mu_t$ inflates every obstacle in \eqref{eq:ocp}; it grows when sensing degrades (Fig.~\ref{fig:aci}) and shrinks when tracking is accurate. Theorem~\ref{thm:aci} and Corollary~\ref{cor:safety} bound the long-run miss and violation frequencies for \emph{any} disturbance sequence.

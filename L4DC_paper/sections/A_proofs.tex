@@ -1,0 +1,62 @@
+\section{Proofs and Supporting Facts}
+\label{app:proofs}
+
+\paragraph{Fact 1 (no free lunch).}
+If the plant is linear, the process and measurement noise are Gaussian with known covariances, and $d_t$ is a Gauss--Markov process matching the KF model, then the KF estimate is the conditional mean $\E[d_t\mid\info_t]$. By the separation principle, certainty-equivalent LQ control with it is optimal for the quadratic cost. Any gain from learning must therefore come from violating one of these assumptions.
+
+\paragraph{Fact 2 (mixtures).}
+Let the task distribution be a mixture over regimes $m\in\{1,\dots,M\}$, each linear-Gaussian with Kalman estimate $\dhat^{(m)}_t$. Then
+\[
+  \E[d_t\mid\info_t]=\sum_m \pi_t(m)\,\dhat^{(m)}_t,\qquad \pi_t(m)=\Pr(m\mid\info_t).
+\]
+The weights $\pi_t$ are nonlinear functions of the data (likelihood ratios of the innovations). This posterior mean is the unique $L_2$-optimal estimator, so whenever it is not a linear function of the data, every linear time-invariant filter, including any single KF, has strictly larger risk. MMAE implements this posterior under its own (approximate) model. A sequence model trained on samples from the mixture approximates it without requiring the regime models.
+
+\paragraph{Fact 3 (residual parametrisation).}
+With $\dhat=\dhat^{\mathrm{KF}}+c_\vartheta$ and a class that contains $c\equiv0$, the population-risk minimiser over the class has risk no larger than the KF. Empirical-risk minimisation adds only the usual generalisation term.
+
+\paragraph{Proof of Proposition~\ref{prop:nlms}.}
+(a) With $\ell_t(S)=\frac12\norm{v_t-Sk_t}^2$ we have $\nabla\ell_t(S)=-(v_t-Sk_t)k_t^{\T}$. Hence
+\[
+\alpha_tS_{t-1}-\beta_t\nabla\ell_t(\alpha_tS_{t-1})=\alpha_tS_{t-1}+\beta_tv_tk_t^{\T}-\alpha_t\beta_tS_{t-1}k_tk_t^{\T}=\alpha_tS_{t-1}(I-\beta_tk_tk_t^{\T})+\beta_tv_tk_t^{\T},
+\]
+which is \eqref{eq:gdn}. Since $\norm{k_t}=1$, the step is normalised, and $\beta_t=1$ projects onto $\{S:Sk_t=v_t\}$ (Kaczmarz).
+For a scalar channel with $r_t=\varphi_t^{\T}\vartheta+\nu_t$, set $k_t=\varphi_t/\norm{\varphi_t}$ and $v_t=r_t/\norm{\varphi_t}$. The update becomes $S_t=\alpha_tS_{t-1}+\beta_t(r_t-\alpha_tS_{t-1}\varphi_t)\varphi_t^{\T}/\norm{\varphi_t}^2$, which is NLMS with leakage (forgetting) $\alpha_t$.
+
+(b) Write $A=I-\beta kk^{\T}$ and $A'=I-\beta'k'k'^{\T}$. Then
+\[
+AA'=I-\beta kk^{\T}-\beta'k'k'^{\T}+\beta\beta'(k^{\T}k')\,kk'^{\T},\qquad
+A'A=I-\beta kk^{\T}-\beta'k'k'^{\T}+\beta\beta'(k^{\T}k')\,k'k^{\T},
+\]
+so $AA'-A'A=\beta\beta'(k^{\T}k')(kk'^{\T}-k'k^{\T})$. This is nonzero if $k^{\T}k'\neq0$ and $k\not\parallel k'$.
+The state transition of \eqref{eq:gdn} acting on $S$ is $S\mapsto\alpha S A$, that is, $\alpha(A^{\T}\otimes I)$ on $\mathrm{vec}(S)$, which inherits the non-commutativity.
+If an invertible linear map $P$ made all transitions diagonal, $P\,\alpha(A^{\T}\otimes I)P^{-1}=D_A$ and $P\,\alpha'(A'^{\T}\otimes I)P^{-1}=D_{A'}$, then the transitions would commute, because diagonal matrices commute. This is a contradiction. \hfill$\blacksquare$
+
+\paragraph{Proof of Theorem~\ref{thm:ms}.}
+For a stable LTI MIMO system $T$ driven by a wide-sense stationary input with spectral density matrix $S_{\etil}(\omega)\succeq0$, the output covariance satisfies
+\[
+\E\norm{\varepsilon_t}^2=\frac1{2\pi}\int_{-\pi}^{\pi}\mathrm{tr}\big(T(e^{i\omega})S_{\etil}(\omega)T(e^{i\omega})^*\big)d\omega\le\frac1{2\pi}\int_{-\pi}^{\pi}\norm{T(e^{i\omega})}_2^2\,\mathrm{tr}S_{\etil}(\omega)\,d\omega,
+\]
+using $\mathrm{tr}(TST^*)\le\norm{T}_2^2\,\mathrm{tr}S$ for $S\succeq0$. Each $\mathrm{MA}_w$ acts componentwise with scalar response $H_w$, so $\E\norm{\mathrm{MA}_w(\etil)_t}^2=\frac1{2\pi}\int|H_w|^2\mathrm{tr}S_{\etil}\,d\omega$.
+By the definition of $c_\lambda$, we have $\norm{T}_2^2\le c_\lambda(\lambda_1+\sum_{w>1}\lambda_w|H_w|^2)$ pointwise, and integrating gives \eqref{eq:msbound}. The supremum is finite because $\lambda_1>0$.
+Without the $\lambda_1$ term, $c_\lambda$ can be infinite: all $H_w$ with $w\in\{10,25,50\}$ vanish at $\omega=2\pi j/5$, which is why the per-step (likelihood) term is kept. \hfill$\blacksquare$
+
+\paragraph{Proof of Theorem~\ref{thm:aci}.}
+Write $q_{t+1}=q_t+\gamma(m_t-\alpha)+c_t$ with $c_t=\max\{0,-(q_t+\gamma(m_t-\alpha))\}\ge0$.
+We first show $q_t\le\bar Q$ for all $t$, by induction. If $q_t>B\ge e_t$, then $m_t=0$ and $q_{t+1}\le q_t$. If $q_t\le B$, then $q_{t+1}\le q_t+\gamma(1-\alpha)\le\bar Q$.
+Summing the update over $t=1,\dots,T$ gives $\gamma\sum_t(m_t-\alpha)=q_{T+1}-q_1-\sum_tc_t\le\bar Q$. Dividing by $\gamma T$ proves the claim.
+Conversely, if the projection is never active ($c_t\equiv0$), then $\frac1T\sum m_t\ge\alpha-q_1/(\gamma T)$, so the miss rate converges to exactly $\alpha$. \hfill$\blacksquare$
+
+\paragraph{Proof of Corollary~\ref{cor:safety}.}
+For every $j$, $\norm{p_{xy,t}-c_j}\ge\norm{\hat p^{(s)}_t-c_j}-\norm{p_{xy,t}-\hat p^{(s)}_t}\ge r_j+\mu_s-e_t$.
+From \eqref{eq:aci}, $q_{\tau+1}-q_\tau\le\gamma(1-\alpha)$ for every $\tau$, so $q_t\le q_s+\ell\gamma(1-\alpha)$ and $\mu_s=\mu_0+q_s\ge q_t$ whenever $\mu_0\ge\ell\gamma(1-\alpha)$.
+A collision ($\min_j(\norm{p_{xy,t}-c_j}-r_j)<0$) then requires $e_t>\mu_s\ge q_t$, that is, $m_t=1$. Collisions at steps whose plan has nonzero slack are counted in $\rho_{\mathrm{slack}}$. \hfill$\blacksquare$
+
+\paragraph{Scope of the safety guarantee.}
+Theorem~\ref{thm:aci} holds for \emph{any} disturbance and fault sequence, but it is a long-run frequency statement, not a hard per-trial bound. The lag condition $\mu_0\ge\ell\gamma(1-\alpha)=4.75$\,cm is a worst case (misses on $\ell$ consecutive steps). We use $\mu_0=1$\,cm, which tracks better, and report the empirical miss and collision frequencies instead (\S\ref{sec:exp-obstacles}). Inter-node chord error is a few millimetres and is absorbed by $\mu_0$.
+
+\subsection{Safe online aggregation}
+\label{app:aggregation}
+Let experts $j=1..K$ (e.g., robust KF, fast KF, GDN) predict $\dhat^{(j)}_t$ before $r_t$ is revealed, with loss $\ell^j_t=\norm{r_t-\dhat^{(j)}_t}^2$.
+Because $\nu_t$ is zero-mean and independent of $\info_t$, $\E\ell^j_t=\E\norm{\etil^{(j)}_t}^2+\E\norm{\nu_t}^2$, so the observable loss ranks the experts by their true estimation error.
+On a domain with $\norm{r},\norm{\dhat}\le B$, the squared loss is $\eta$-exp-concave with $\eta=1/(8B^2)$. Exponentially weighted averaging therefore guarantees, for \emph{any} sequence, $\sum_t\ell^{\mathrm{mix}}_t\le\min_j\sum_t\ell^j_t+8B^2\ln K$ \citep{cesabianchi2006prediction}.
+We implemented this aggregation (\texttt{agg}). It matched the GDN alone, for example 9.7 vs 10.0\,cm median RMSE under stress, so we report the GDN in the main text.

@@ -1,0 +1,19 @@
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Adaptive and robust quadrotor control.}
+Geometric control on $SE(3)$ \citep{lee2010geometric} is the standard nominal tracker. $\mathcal{L}_1$ adaptive augmentation \citep{hovakimyan2010l1,wu2023l1quad} and incremental nonlinear dynamic inversion \citep{smeur2016adaptive,tal2021accurate} compensate lumped disturbances at high bandwidth.
+Adaptive NMPC \citep{hanover2022performance} and learning-based MPC with GP or neural dynamics \citep{torrente2021data,chee2022knode,saviolo2022pitcn,salzmann2023neuralmpc,bauersfeld2021neurobem,saviolo2024active,scampicchio2025gaussian}, including GPs with dynamic forgetting \citep{amer2025gp} and physics-informed models with control \citep{amer2025pinc}, bring learned compensation into a predictive, constrained framework; NMPC also underpins aerial inspection \citep{amer2023visual} and dynamics emulation on multicopters \citep{amer2026dynamic}. Rotor drag is known to matter at speed \citep{faessler2018differential,sun2022comparative}.
+AdaptiveQuadBench \citep{zhang2025adaptivequadbench}, built on RotorPy \citep{folk2023rotorpy}, compares these controllers; we use it unmodified and add sensing/fault regimes and obstacles.
+
+\paragraph{Learning for disturbance adaptation.}
+Neural Lander \citep{shi2019neural} and Neural-Fly \citep{oconnell2022neuralfly} learn aerodynamic residuals and adapt a linear head online. RMA \citep{kumar2021rma} and XAdap \citep{zhang2024xadap} learn an adaptation module that infers a latent from history, and XAdap is one of our baselines.
+Universal dynamics models \citep{xiao2025anycar} and online continual learning \citep{sarabakha2023online} adapt across platforms and tasks. Learned filters such as KalmanNet \citep{revach2022kalmannet} and Backprop-KF \citep{haarnoja2016backprop} replace or augment the KF gain. \citet{forgione2023incontext} frame system identification as in-context learning across a class of systems.
+We take the in-context view inside an offset-free MPC, with a recurrence that is provably a system-identification update and a loss tied to closed-loop error.
+
+\paragraph{Sequence models.}
+Selective state-space models (Mamba, \citealp{gu2023mamba}) use input-dependent \emph{diagonal} recurrences. Linear transformers are fast-weight programmers \citep{schlag2021linear}, and the delta rule \citep{widrow1960adaptive} replaces their additive update with an error-correcting one. It can be trained in parallel over the sequence \citep{yang2024parallelizing} and, with gating, gives the Gated Delta Network \citep{yang2025gated}.
+
+\paragraph{Safe learning-based MPC and conformal prediction.}
+Learning-based MPC with safety guarantees typically relies on tube constructions \citep{mayne2005robust}, probabilistic constraint tightening \citep{hewing2020cautious,hewing2020learning} or control barrier functions \citep{ames2019cbf}. These require a bound or a distribution on the model error.
+Conformal prediction gives distribution-free uncertainty sets. Its adaptive variant (ACI, \citealp{gibbs2021adaptive}; \citealp{angelopoulos2023conformal}) retains long-run coverage under arbitrary distribution shift. It has been used to plan around uncertain \emph{other} agents \citep{lindemann2023safe,dixit2023adaptive}. We instead calibrate the controller's \emph{own} plan-tracking error and use it to tighten soft state constraints \citep{kerrigan2000soft} online.

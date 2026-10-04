@@ -1,0 +1,14 @@
+\begin{tabular}{l l r r r}
+\toprule
+Regime & best strong baseline & GDN gain & wins & $p$ (Wilcoxon) \\
+\midrule
+Base & MMAE & 0.87$\times$ & 7/140 & 1.00 \\
+Gauss.\ noise & robust KF & 1.03$\times$ & 78/140 & $4\!\cdot\!10^{-3}$ \\
+Heavy-tail & robust KF & 1.07$\times$ & 83/140 & 0.01 \\
+Outliers & robust KF & 1.01$\times$ & 93/140 & $5\!\cdot\!10^{-5}$ \\
+Dropout & robust KF & 1.26$\times$ & 117/140 & $<\!10^{-6}$ \\
+Rotor flicker & MMAE & 1.50$\times$ & 81/140 & $<\!10^{-6}$ \\
+Impacts & robust KF & 0.84$\times$ & 33/140 & 1.00 \\
+Stress (all) & robust KF & 1.11$\times$ & 78/140 & $3\!\cdot\!10^{-3}$ \\
+\bottomrule
+\end{tabular}

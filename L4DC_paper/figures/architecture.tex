@@ -1,0 +1,22 @@
+% Architecture diagram of ICON-MPC (TikZ, included from sections/04_method.tex)
+\begin{tikzpicture}[
+  font=\scriptsize, >={Stealth[length=1.6mm]},
+  blk/.style={draw, rounded corners=2pt, align=center, minimum height=7mm, inner sep=2pt, fill=#1},
+  blk/.default=white, lab/.style={font=\tiny, align=center}]
+  \node[blk=gray!12, minimum width=15mm] (plant) {Quadrotor\\(RotorPy)};
+  \node[blk=red!8, right=6mm of plant, minimum width=17mm] (fe) {Robust front end\\stale / outlier / jump};
+  \node[blk=orange!12, right=6mm of fe, minimum width=16mm] (feat) {Physics features\\residual + KF bank};
+  \node[blk=green!15, right=6mm of feat, minimum width=19mm] (gdn) {Gated DeltaNet\\$S_t{=}\alpha_t S_{t-1}(I{-}\beta_t k_tk_t^{\T}){+}\beta_t v_tk_t^{\T}$};
+  \node[blk=blue!10, below=7mm of gdn, minimum width=19mm] (mpc) {Offset-free NMPC\\(acados, SQP-RTI)};
+  \node[blk=purple!10, left=6mm of mpc, minimum width=16mm] (aci) {Adaptive conformal\\margin $\mu_t$};
+  \node[blk=yellow!15, left=6mm of aci, minimum width=17mm] (obs) {Keep-out constraints\\$h_j(p)\ge(r_j{+}\mu_t)^2$};
+  \draw[->] (plant) -- node[above, lab]{$y_t$} (fe);
+  \draw[->] (fe) -- node[above, lab]{$\bar y_t$} (feat);
+  \draw[->] (feat) -- node[above, lab]{$\phi_t$} (gdn);
+  \draw[->] (gdn) -- node[right, lab]{$\dhat_t,\ \hat x_t$} (mpc);
+  \draw[->] (mpc.south) -- ++(0,-3.5mm) -| node[pos=0.25, below, lab]{rotor thrusts $u_t$} (plant.south);
+  \draw[->] (mpc) -- node[above, lab]{plan $\hat X$} (aci);
+  \draw[->] (aci) -- (obs);
+  \draw[->] (obs.north) -- ++(0,2.5mm) -| ([xshift=-3mm]mpc.north);
+  \draw[->, dashed] (fe.south) -- ++(0,-2mm) -| node[pos=0.2, below, lab]{realised $p_t$} (aci.north);
+\end{tikzpicture}

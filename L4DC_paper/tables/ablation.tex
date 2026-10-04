@@ -1,0 +1,16 @@
+\begin{tabular}{l rrrrrrrr}
+\toprule
+Variant & Base & Gauss.\ noise & Heavy-tail & Outliers & Dropout & Rotor flicker & Impacts & Stress (all) \\
+\midrule
+NMPC, nominal model (no drag, no estimator) & 5.08 & 4.89 & 4.98 & 5.08 & 6.08 & 9.45 & 9.52 & 22.72$^{95}$ \\
+\quad + rotor-drag model & 4.02 & 4.01 & 3.98 & 4.01 & 5.02 & 8.52 & 8.83 & 20.98$^{94}$ \\
+\quad + robust lumped KF & 0.52 & 1.00 & 0.98 & 1.19 & 2.31 & 1.11 & 5.92$^{95}$ & 11.06$^{92}$ \\
+\quad + learned estimator: GRU & 0.52 & 1.02 & 1.00 & 1.23 & 1.87 & 0.79 & 6.53 & 9.97$^{98}$ \\
+\quad + learned estimator: Mamba & 0.41 & 0.92 & 0.81 & 1.02 & 1.81 & 0.64 & 6.54 & 9.44 \\
+\quad + learned estimator: GDN (full) & 0.46 & 0.97 & 0.91 & 1.19 & 1.79 & 0.74 & 7.53 & 9.34$^{98}$ \\
+\midrule
+full $-$ robust front end & 0.46 & 0.97 & 0.93 & 1.83 & 24.22$^{81}$ & 0.66 & 6.92 & 55.98$^{58}$ \\
+full $-$ learned state filter & 0.46 & 0.94 & 0.89 & 1.16 & 1.93 & 0.76 & 7.64 & 9.99$^{99}$ \\
+full $-$ offset-free input reference & 0.46 & 0.97 & 0.91 & 1.19 & 1.80 & 0.75 & 7.53 & 9.53$^{99}$ \\
+\bottomrule
+\end{tabular}

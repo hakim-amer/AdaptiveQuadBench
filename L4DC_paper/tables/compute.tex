@@ -1,0 +1,18 @@
+\begin{tabular}{l r r r r}
+\toprule
+Controller & mean [ms] & p99 [ms] & stress success & stress RMSE [cm] \\
+\midrule
+Geometric & 0.42 & 3.3 & 14\% & fail \\
+Geo-adaptive & 0.50 & 3.4 & 17\% & fail \\
+L1-Geo & 0.63 & 3.7 & 7\% & fail \\
+INDI-A & 0.39 & 3.1 & 9\% & fail \\
+L1-MPC & 0.54 & 5.5 & 10\% & fail \\
+MPC & 0.32 & 3.3 & 59\% & 86.1 \\
+XAdap & 0.62 & 5.2 & 73\% & 59.3 \\
+\midrule
+NMPC + robust KF & 3.59 & 7.4 & 92\% & 11.1 \\
+NMPC + MMAE & 4.43 & 9.1 & 96\% & 11.2 \\
+\textbf{ICON-MPC (GDN)} & 3.93 & 6.5 & 98\% & 9.3 \\
+ICON-MPC (Mamba) & 3.65 & 5.9 & 100\% & 9.4 \\
+\bottomrule
+\end{tabular}
