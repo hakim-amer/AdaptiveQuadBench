@@ -37,6 +37,7 @@ REGIMES = {
     'lat_rand': {'latency': 'random'},  # per-trial latency ~ U(0, 60 ms), unknown to the controller
     'combo': {'noise': 1.0, 'latency': 0.02, 'aggressive': True, 'rotor_fault': True},
     'mix': {'mix': True},
+    'mix2': {'mix': 2},  # mix + non-Gaussian noise / outliers / impulses / flicker faults; training only
     # non-Gaussian sensing / unmodelled events (stress tests; not used for training)
     'heavy': {'noise': 1.0, 'heavy': 2.5},           # Student-t (nu=2.5) instead of Gaussian noise
     'outlier': {'noise': 1.0, 'outlier': 0.02},      # 2 %/step per-channel glitches of 20 sigma
@@ -65,6 +66,17 @@ def spec_for(regime, i):
         out['rotor_fault'] = True
     if rng.random() < 0.3:
         out['gust_front'] = True
+    if spec['mix'] == 2:
+        r2 = np.random.default_rng(480000 + i)
+        if 'noise' in out and r2.random() < 0.3:
+            out['heavy'] = 2.5
+        if 'noise' in out and r2.random() < 0.3:
+            out['outlier'] = 0.02
+        if r2.random() < 0.3:
+            out['impulse'] = True
+        if r2.random() < 0.3:
+            out.pop('rotor_fault', None)
+            out['flicker'] = True
     return out
 
 
@@ -164,6 +176,7 @@ def apply_impulses(vehicle, i):
             clock['k'] += 1
         return out
     vehicle.step = kicked_step
+    vehicle.kick_times = kicks
 
 
 def apply_flicker_fault(vehicle, i):

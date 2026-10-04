@@ -124,6 +124,11 @@ class OracleNMPC(MultirotorControlTemplate):
         # gate=1: robust measurement front end (stale-packet + outlier rejection) before everything
         self.front = None
         self.jreset = int(kf_kwargs.pop('jreset', 0))
+        # ffu=1: offset-free input reference (static allocation that cancels the estimated torque)
+        self.ffu = int(kf_kwargs.pop('ffu', 0))
+        q_yaw = kf_kwargs.pop('qyaw', None)
+        if q_yaw is not None:
+            self.mpc.set_weights(float(q_yaw))
         if int(kf_kwargs.pop('gate', 0)):
             from icon_mpc.estimators import RobustFrontEnd
             self.front = RobustFrontEnd(sim_dt)
@@ -193,6 +198,20 @@ class OracleNMPC(MultirotorControlTemplate):
             p[LAYOUT.slices['tau']] = state.get('ext_torque', np.zeros(3))
             p[LAYOUT.slices['wind']] = state.get('wind', np.zeros(3))
         return np.tile(p, (N + 1, 1))
+
+    @staticmethod
+    def _offset_free_input(ur, pk):
+        """Rotor thrusts with the same collective thrust as ur whose body moments cancel the
+        estimated external torque (the steady state the NMPC should not be penalised for)."""
+        r = pk[LAYOUT.slices['r']].reshape(4, 3)
+        g, kap = pk[LAYOUT.slices['g']], pk[LAYOUT.slices['kappa']]
+        A = np.vstack([g, r[:, 1] * g, -r[:, 0] * g, kap])
+        b = np.concatenate([[g @ ur], -pk[LAYOUT.slices['tau']]])
+        try:
+            u = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            return ur
+        return np.clip(u, 0.0, None) if np.all(np.isfinite(u)) else ur
 
     def _rk4(self, x, u, params):
         if self._f is None:
@@ -279,6 +298,8 @@ class OracleNMPC(MultirotorControlTemplate):
                                            pk[LAYOUT.slices['g']].sum())
                 if np.dot(xr[6:10], x0[6:10]) < 0:
                     xr[6:10] *= -1
+                if self.ffu:
+                    ur = self._offset_free_input(ur, pk)
                 if k < self.N:
                     yref[k] = np.concatenate([xr, ur])
                 else:

@@ -154,6 +154,7 @@ def get_param_nmpc(f_max, t_horizon=0.5, n_nodes=10):
     solver.solver.reset()
     solver.n_solves = solver.n_fail = 0
     solver.set_input_bounds(f_max)
+    solver.set_weights()
     return solver
 
 
@@ -209,6 +210,17 @@ class ParamNMPCSolver:
         finally:
             os.chdir(cwd)
         self.set_input_bounds(f_max)
+
+    def set_weights(self, q_yaw=None):
+        """Runtime cost weights; q_yaw overrides the weight on the quaternion z component
+        (~ half the yaw error near hover). Default: the compiled weights."""
+        Q = self.Q.copy()
+        if q_yaw is not None:
+            Q[9] = q_yaw
+        W = np.diag(np.concatenate([Q, self.R]))
+        for k in range(self.N):
+            self.solver.cost_set(k, 'W', W)
+        self.solver.cost_set(self.N, 'W', np.diag(Q))
 
     def set_input_bounds(self, f_max):
         self.f_max = f_max

@@ -110,12 +110,17 @@ class FeatureExtractor:
         return self.model.m * acc6[:3], self.model.J @ acc6[3:]
 
 
-def labels_from_truth(model, xs, omegas, omega_cmds, avg=LABEL_AVG):
+def labels_from_truth(model, xs, omegas, omega_cmds, avg=LABEL_AVG, skip=()):
     """xs: (T, 13) true states, omegas: (T, 4) true rotor speeds, omega_cmds: (T, 4) applied
     commands over [k, k+1]. Returns (T-1, 6) labels in acceleration units: the mean one-step
     residual over [k, k+avg) (truncated at the end), i.e. the disturbance the NMPC will face next."""
     one = np.stack([model.residual(xs[k], xs[k + 1], omegas[k], omega_cmds[k])
                     for k in range(len(xs) - 1)])
+    # state jumps (impacts) are not disturbances the NMPC can anticipate: replace those one-step
+    # residuals by the last regular one
+    for k in sorted(skip):
+        if 0 <= k < len(one):
+            one[k] = one[k - 1] if k > 0 else 0.0
     c = np.concatenate([np.zeros((1, 6)), np.cumsum(one, 0)])
     idx = np.arange(len(one))
     hi = np.minimum(idx + avg, len(one))

@@ -268,7 +268,12 @@ def run_task(task):
              'heading_wrapped_deg': np.nan, 'cmd_rate': np.nan, 'error': repr(e)[:200]}
     faulthandler.cancel_dump_traceback_later()
     if collect:
-        m['data'] = _training_data(controller, res, cparams) if np.isfinite(m['rmse']) else None
+        kicks = getattr(vehicle, 'kick_times', None)
+        skip = ()
+        if kicks is not None:
+            k_idx = np.searchsorted(np.asarray(res['time']), kicks)
+            skip = {int(k) + d for k in k_idx for d in (-2, -1, 0, 1)}
+        m['data'] = _training_data(controller, res, cparams, skip) if np.isfinite(m['rmse']) else None
     m.update(regime=regime, experiment=experiment, controller=ctrl_name, trial=i, wall_s=time.time() - t0,
              solve_fail=getattr(getattr(controller, 'mpc', None), 'n_fail', np.nan),
              solve_ms=float(np.mean(controller.solve_times) * 1e3) if getattr(controller, 'solve_times', None) else np.nan,
@@ -277,7 +282,7 @@ def run_task(task):
     return m
 
 
-def _training_data(controller, res, cparams):
+def _training_data(controller, res, cparams, skip=()):
     """Features (as the controller saw them online) + true lumped-disturbance labels."""
     from icon_mpc.learned.features import FeatureExtractor, labels_from_truth
     fe = FeatureExtractor(controller.p_nom, controller.k_eta_ctrl, SIM_DT, cparams.get('tau_m'))
@@ -286,7 +291,7 @@ def _training_data(controller, res, cparams):
     S = res['state']
     xs = np.concatenate([S['x'], S['v'], S['q'][:, [3, 0, 1, 2]], S['w']], axis=1)
     q_meas = np.stack([st['q'] for st, _ in controller.record])
-    lab = labels_from_truth(fe.model, xs, S['rotor_speeds'], res['control']['cmd_motor_speeds'])
+    lab = labels_from_truth(fe.model, xs, S['rotor_speeds'], res['control']['cmd_motor_speeds'], skip=skip)
     n = min(len(lab), len(feats))
     return {'feat': np.stack(feats[:n]), 'base': np.stack(base[:n]), 'label': lab[:n],
             'sbase': np.stack(sbase[:n]),
