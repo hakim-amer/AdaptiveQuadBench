@@ -113,6 +113,12 @@ class OracleNMPC(MultirotorControlTemplate):
         self.aci_alpha = float(kf_kwargs.pop('aci_alpha', 0.05))
         self.aci_gamma = float(kf_kwargs.pop('aci_gamma', 0.005))
         self.aci_q, self.aci_miss, self.aci_n = 0.02, 0, 0
+        # aci=2: mode-conditional (Mondrian) ACI with separate quantiles for nominal / degraded
+        # sensing (front-end stale, resume, jump or rejection within the last deg_s seconds)
+        self.aci_qg = [0.02, 0.04]
+        self.deg_s = float(kf_kwargs.pop('deg_s', 0.3))
+        self.deg_left, self.n_rej_prev, self.mode = 0, 0, 0
+        self.margin_log = []
         self.plans = deque(maxlen=64)
         self.obstacles = None
         self.mpc = get_param_nmpc(f_max, t_horizon, n_nodes, n_obs=4 if self.use_obs else 0)
@@ -204,17 +210,23 @@ class OracleNMPC(MultirotorControlTemplate):
         if len(self.plans) and self.plans[0][0] <= self.step - lag:
             while len(self.plans) > 1 and self.plans[1][0] <= self.step - lag:
                 self.plans.popleft()
-            k0, X = self.plans[0]
+            k0, X, g = self.plans[0]
             j = (self.step - k0) * self.sim_dt / node_dt
             if j <= self.N:
                 jl = int(np.floor(j))
                 ju = min(jl + 1, self.N)
                 pred = X[jl, :2] + (j - jl) * (X[ju, :2] - X[jl, :2])
                 e = np.linalg.norm(np.asarray(state['x'][:2]) - pred)
-                miss = float(e > self.aci_q)
-                self.aci_q = max(0.0, self.aci_q + self.aci_gamma * (miss - self.aci_alpha))
+                if self.aci == 2:
+                    miss = float(e > self.aci_qg[g])
+                    self.aci_qg[g] = max(0.0, self.aci_qg[g] + self.aci_gamma * (miss - self.aci_alpha))
+                else:
+                    miss = float(e > self.aci_q)
+                    self.aci_q = max(0.0, self.aci_q + self.aci_gamma * (miss - self.aci_alpha))
                 self.aci_miss += miss
                 self.aci_n += 1
+        if self.aci == 2:
+            return self.obs_m + self.aci_qg[self.mode]
         return self.obs_m + self.aci_q
 
     def update_trajectory(self, trajectory):
@@ -299,6 +311,13 @@ class OracleNMPC(MultirotorControlTemplate):
             state = dict(state)
             state.update(self.front.filter(state, pred))
             event = self.front.event
+            n_rej = self.front.n_reject
+            if event is not None or n_rej > self.n_rej_prev:
+                self.deg_left = int(round(self.deg_s / self.sim_dt))
+            else:
+                self.deg_left = max(0, self.deg_left - 1)
+            self.n_rej_prev = n_rej
+            self.mode = int(self.deg_left > 0)
             q = state['q']
             self.x_fe = np.concatenate([state['x'], state['v'], [q[3], q[0], q[1], q[2]], state['w']])
             if event == 'jump':
@@ -356,10 +375,11 @@ class OracleNMPC(MultirotorControlTemplate):
                 m = self._obstacle_margin(state)
                 ob = self.obstacles.copy()
                 ob[:, 2] = np.where(ob[:, 2] > 0, ob[:, 2] + m, 0.0)
+                self.margin_log.append((t, m, self.mode))
                 self.mpc.obs = ob.reshape(-1)
             u, ts = self.mpc.solve(x0, yref, yref_e, params)
             if self.use_obs and getattr(self.mpc, 'X_pred', None) is not None:
-                self.plans.append((self.step, self.mpc.X_pred.copy()))
+                self.plans.append((self.step, self.mpc.X_pred.copy(), self.mode))
             if np.all(np.isfinite(u)):
                 self.u = np.clip(u, 0, self.mpc.f_max)
             self.solve_times.append(ts)

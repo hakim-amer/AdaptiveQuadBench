@@ -278,6 +278,15 @@ def run_task(task):
         if obstacles is not None:  # a crashed/diverged rollout counts as a collision
             m.update(min_clear=-np.inf, collision=1.0, coll_frac=np.nan)
     faulthandler.cancel_dump_traceback_later()
+    save_dir = os.environ.get('ICON_SAVE_TRAJ')
+    if save_dir and 'res' in locals():  # full rollout for plots / 3D animations
+        os.makedirs(save_dir, exist_ok=True)
+        tag = f'{experiment}_{regime}_{i}_{ctrl_name}'.replace('/', '_')
+        np.savez_compressed(os.path.join(save_dir, tag + '.npz'), time=res['time'], x=res['state']['x'],
+                            q=res['state']['q'], xd=res['flat']['x'],
+                            obstacles=obstacles if obstacles is not None else np.zeros((0, 3)),
+                            margin=np.array(getattr(controller, 'margin_log', []) or np.zeros((0, 3))),
+                            controller=ctrl_name, rmse=m['rmse'])
     if collect:
         kicks = getattr(vehicle, 'kick_times', None)
         skip = ()

@@ -17,6 +17,7 @@ def main():
     ap.add_argument('--ref', default='gdn_mix2,filt=1,gate=1,ffu=1,qyaw=1,obs=1,aci=1]')
     a = ap.parse_args()
     d = pd.concat([pd.read_csv(f) for f in a.csv], ignore_index=True)
+    d = d.drop_duplicates(['regime', 'experiment', 'trial', 'controller'])
     d['ok'] = np.isfinite(d.rmse) & (d.rmse < 1.0)
     d['unsafe'] = ((d.collision > 0) | ~d.ok).astype(int)  # a crash counts as unsafe
     key = ['experiment', 'trial']
