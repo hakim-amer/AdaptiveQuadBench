@@ -29,7 +29,7 @@ A'A=I-\beta kk^{\T}-\beta'k'k'^{\T}+\beta\beta'(k^{\T}k')\,k'k^{\T},
 \]
 so $AA'-A'A=\beta\beta'(k^{\T}k')(kk'^{\T}-k'k^{\T})$. This is nonzero if $k^{\T}k'\neq0$ and $k\not\parallel k'$.
 The state transition of \eqref{eq:gdn} acting on $S$ is $S\mapsto\alpha S A$, that is, $\alpha(A^{\T}\otimes I)$ on $\mathrm{vec}(S)$, which inherits the non-commutativity.
-If an invertible linear map $P$ made all transitions diagonal, $P\,\alpha(A^{\T}\otimes I)P^{-1}=D_A$ and $P\,\alpha'(A'^{\T}\otimes I)P^{-1}=D_{A'}$, then the transitions would commute, because diagonal matrices commute. This is a contradiction. \hfill$\blacksquare$
+Let $M_A=\alpha(A^{\T}\otimes I)$ and suppose an injective linear map $E$ (into a space of any dimension) satisfies $EM_A=D_AE$ and $EM_{A'}=D_{A'}E$ with diagonal $D_A,D_{A'}$. Then $E(M_AM_{A'}-M_{A'}M_A)=(D_AD_{A'}-D_{A'}D_A)E=0$, and injectivity of $E$ gives $M_AM_{A'}=M_{A'}M_A$, contradicting non-commutativity. \hfill$\blacksquare$
 
 \paragraph{Proof of Theorem~\ref{thm:ms}.}
 For a stable LTI MIMO system $T$ driven by a wide-sense stationary input with spectral density matrix $S_{\etil}(\omega)\succeq0$, the output covariance satisfies
@@ -57,6 +57,6 @@ Theorem~\ref{thm:aci} holds for \emph{any} disturbance and fault sequence, but i
 \subsection{Safe online aggregation}
 \label{app:aggregation}
 Let experts $j=1..K$ (e.g., robust KF, fast KF, GDN) predict $\dhat^{(j)}_t$ before $r_t$ is revealed, with loss $\ell^j_t=\norm{r_t-\dhat^{(j)}_t}^2$.
-Because $\nu_t$ is zero-mean and independent of $\info_t$, $\E\ell^j_t=\E\norm{\etil^{(j)}_t}^2+\E\norm{\nu_t}^2$, so the observable loss ranks the experts by their true estimation error.
+If $\nu_t$ is conditionally zero-mean and uncorrelated with the expert predictions (exactly so when predictions use information up to $t-1$, approximately otherwise), $\E\ell^j_t=\E\norm{\etil^{(j)}_t}^2+\E\norm{\nu_t}^2$, so the observable loss ranks the experts by their true estimation error. The regret bound below holds without this assumption.
 On a domain with $\norm{r},\norm{\dhat}\le B$, the squared loss is $\eta$-exp-concave with $\eta=1/(8B^2)$. Exponentially weighted averaging therefore guarantees, for \emph{any} sequence, $\sum_t\ell^{\mathrm{mix}}_t\le\min_j\sum_t\ell^j_t+8B^2\ln K$ \citep{cesabianchi2006prediction}.
 We implemented this aggregation (\texttt{agg}). It matched the GDN alone, for example 9.7 vs 10.0\,cm median RMSE under stress, so we report the GDN in the main text.

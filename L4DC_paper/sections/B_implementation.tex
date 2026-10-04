@@ -9,10 +9,10 @@ Obstacle slots that are not in use are placed 10\,m away; very distant dummy slo
 
 \paragraph{Estimators.}
 The KF bank consists of four lumped random-walk KFs on $(F/m,J^{-1}\tau)$ with different measurement and process noise. The robust-KF baseline uses $r_v{=}r_\omega{=}0.15$, $q_F{=}10$, $q_\tau{=}1$. MMAE combines the bank with posterior forgetting 0.95.
-The GDN has 2 layers, $d_{\mathrm{model}}{=}64$, 4 heads of size 16, a short depthwise causal convolution on $q,k,v$, SiLU activations, $\ell_2$-normalised queries and keys, and a SiLU output gate (51k parameters). Mamba has 2 layers, $d_{\mathrm{model}}{=}64$ and $d_{\mathrm{state}}{=}16$ (72k parameters). The GRU has 2 layers with hidden size 64.
+The GDN has 2 layers, $d_{\mathrm{model}}{=}64$, 4 heads of size 16, a short depthwise causal convolution on $q,k,v$, SiLU activations, $\ell_2$-normalised queries and keys, and a SiLU output gate (51k parameters). Mamba has 2 layers, $d_{\mathrm{model}}{=}64$ and $d_{\mathrm{state}}{=}16$ (72k parameters). The GRU has 2 layers with hidden size 64 (56k parameters).
 The output head has 36 values: 18 means (6 disturbance corrections and 12 state outputs) and 18 log-variances.
 Training: AdamW with learning rate $2\cdot10^{-3}$, one-cycle schedule, batch size 32, 40 epochs, gradient clipping at 1, multi-scale weight $\lambda{=}1$ with windows $\{10,25,50\}$; validation is by held-out trial index. On one RTX~5070 GPU, the chunk-parallel form takes 19\,ms per batch, against 275\,ms for the sequential scan.
-Data: KF-NMPC behaviour rollouts (one of several KF tunings chosen per trial) on the training regime mixture, plus one DAgger round. These use benchmark seed 7 and trial indices 20--99, disjoint from evaluation (seed 42, trials 0--19).
+Data: KF-NMPC behaviour rollouts (one of several KF tunings chosen per trial) on the training regime mixture, plus one DAgger round. In total ${\approx}10^4$ five-second sequences from benchmark seed 7 and trial indices 20--539, disjoint from evaluation (seed 42, trials 0--19).
 
 \paragraph{Sensing and fault regimes.}
 Noise standard deviations: position 5\,mm, velocity 0.05\,m/s, attitude 0.01\,rad, body rate 0.05\,rad/s and rotor speed 20\,rad/s. \emph{Heavy}: the same scales with Student-$t$ ($\nu{=}2.5$) draws.
