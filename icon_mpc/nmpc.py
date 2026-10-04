@@ -145,11 +145,12 @@ def _default_params():
 _SOLVER_CACHE = {}
 
 
-def get_param_nmpc(f_max, t_horizon=0.5, n_nodes=10):
+def get_param_nmpc(f_max, t_horizon=0.5, n_nodes=10, n_obs=0):
     """Per-process cached solver, reset to a cold start so rollouts stay independent."""
-    key = (t_horizon, n_nodes)
+    key = (t_horizon, n_nodes, n_obs)
     if key not in _SOLVER_CACHE:
-        _SOLVER_CACHE[key] = ParamNMPCSolver(f_max, t_horizon, n_nodes)
+        _SOLVER_CACHE[key] = ParamNMPCSolver(f_max, t_horizon, n_nodes, n_obs=n_obs,
+                                             name='icon_param_nmpc' + (f'_obs{n_obs}' if n_obs else ''))
     solver = _SOLVER_CACHE[key]
     solver.solver.reset()
     solver.n_solves = solver.n_fail = 0
@@ -164,8 +165,12 @@ class ParamNMPCSolver:
     Q = np.array([10, 10, 10, 10, 10, 10, 0.1, 0.1, 0.1, 0.1, 0.01, 0.01, 0.01])
     R = np.array([0.01, 0.01, 0.01, 0.01])
 
-    def __init__(self, f_max, t_horizon=0.5, n_nodes=10, name='icon_param_nmpc'):
-        self.N, self.T = n_nodes, t_horizon
+    OBS_FAR = 10.0  # unused obstacle slot (moderate distance keeps the QP well scaled)
+
+    def __init__(self, f_max, t_horizon=0.5, n_nodes=10, name='icon_param_nmpc', n_obs=0):
+        self.N, self.T, self.n_obs = n_nodes, t_horizon, n_obs
+        # obstacle slots: vertical cylinders (cx, cy, R) with R already including body + margin
+        self.obs = np.tile([self.OBS_FAR, self.OBS_FAR, 0.0], n_obs)
         self.n_solves = self.n_fail = 0
         os.makedirs(BUILD_DIR, exist_ok=True)
         code_dir = os.path.join(BUILD_DIR, f'{name}_N{n_nodes}')
@@ -177,6 +182,22 @@ class ParamNMPCSolver:
         ocp.solver_options.N_horizon = n_nodes
         ocp.solver_options.tf = t_horizon
         ocp.parameter_values = _default_params()
+        if n_obs:
+            # soft (exact L1 + quadratic penalty) keep-out constraints at every shooting node > 0
+            po = cs.SX.sym('p_obs', 3 * n_obs)
+            ocp.model.p = cs.vertcat(ocp.model.p, po)
+            ocp.parameter_values = np.concatenate([ocp.parameter_values, self.obs])
+            px, py = ocp.model.x[0], ocp.model.x[1]
+            h = cs.vertcat(*[(px - po[3 * j]) ** 2 + (py - po[3 * j + 1]) ** 2 - po[3 * j + 2] ** 2
+                             for j in range(n_obs)])
+            ocp.model.con_h_expr = h
+            ocp.model.con_h_expr_e = h
+            for suf in ('', '_e'):
+                setattr(ocp.constraints, 'lh' + suf, np.zeros(n_obs))
+                setattr(ocp.constraints, 'uh' + suf, np.full(n_obs, 1e6))
+                setattr(ocp.constraints, 'idxsh' + suf, np.arange(n_obs))
+                for z, w in (('zl', 1e3), ('zu', 0.0), ('Zl', 1e4), ('Zu', 0.0)):
+                    setattr(ocp.cost, z + suf, np.full(n_obs, w))
         ny = 17
         ocp.cost.cost_type = 'LINEAR_LS'
         ocp.cost.cost_type_e = 'LINEAR_LS'
@@ -233,6 +254,8 @@ class ParamNMPCSolver:
         s = self.solver
         s.set(0, 'lbx', x0)
         s.set(0, 'ubx', x0)
+        if self.n_obs:
+            params = np.hstack([params, np.tile(self.obs, (len(params), 1))])
         for k in range(self.N):
             s.set(k, 'yref', yref[k])
             s.set(k, 'p', params[k])
@@ -244,6 +267,7 @@ class ParamNMPCSolver:
         # SQP-RTI can report success with an exploded predicted trajectory (QP hit its iteration
         # cap); warm-starting from such iterates makes the next HPIPM call hang forever.
         X = np.stack([s.get(k, 'x') for k in range(self.N + 1)])
+        self.X_pred = X
         bad_traj = (not np.all(np.isfinite(X)) or np.abs(X).max() > 1e3
                     or np.abs(np.linalg.norm(X[:, 6:10], axis=1) - 1).max() > 0.5)
         if status not in (0, 2) or not np.all(np.isfinite(u)) or bad_traj:

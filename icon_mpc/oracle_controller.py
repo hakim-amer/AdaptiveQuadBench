@@ -103,8 +103,19 @@ class OracleNMPC(MultirotorControlTemplate):
         self.N, self.T = n_nodes, t_horizon
         self.k_eta_ctrl = ctrl_params['k_eta']
         f_max = self.k_eta_ctrl * ctrl_params['rotor_speed_max'] ** 2
-        self.mpc = get_param_nmpc(f_max, t_horizon, n_nodes)
         kf_kwargs = dict(kf_kwargs or {})
+        # obs=1: soft keep-out constraints for (up to 4) vertical-cylinder obstacles, inflated by a
+        # margin: fixed (obsm, m) or, with aci=1, obsm + an adaptive-conformal quantile of the
+        # realised deviation from the plan (guarantee G5: long-run miscoverage -> aci_alpha)
+        self.use_obs = int(kf_kwargs.pop('obs', 0))
+        self.obs_m = float(kf_kwargs.pop('obsm', 0.0))
+        self.aci = int(kf_kwargs.pop('aci', 0))
+        self.aci_alpha = float(kf_kwargs.pop('aci_alpha', 0.05))
+        self.aci_gamma = float(kf_kwargs.pop('aci_gamma', 0.005))
+        self.aci_q, self.aci_miss, self.aci_n = 0.02, 0, 0
+        self.plans = deque(maxlen=64)
+        self.obstacles = None
+        self.mpc = get_param_nmpc(f_max, t_horizon, n_nodes, n_obs=4 if self.use_obs else 0)
         self.record = None  # set to [] to log (measured state, believed applied command) per step
         aero = bool(kf_kwargs.pop('aero', level != 'nominal'))
         # delay (s): known actuation latency -> KF uses the command actually applied and the NMPC
@@ -126,6 +137,9 @@ class OracleNMPC(MultirotorControlTemplate):
         self.jreset = int(kf_kwargs.pop('jreset', 0))
         # ffu=1: offset-free input reference (static allocation that cancels the estimated torque)
         self.ffu = int(kf_kwargs.pop('ffu', 0))
+        # jbyp=n: for n steps after a detected state jump feed the raw measured state to the NMPC
+        # (estimator state filters lag a jump); the disturbance estimate is still used
+        self.jbyp, self.jbyp_left = int(kf_kwargs.pop('jbyp', 0)), 0
         q_yaw = kf_kwargs.pop('qyaw', None)
         if q_yaw is not None:
             self.mpc.set_weights(float(q_yaw))
@@ -176,6 +190,32 @@ class OracleNMPC(MultirotorControlTemplate):
                                                 model=kf_kwargs['model']))
             self.kf = SafeAggregator(experts, float(self.p_nom[LAYOUT.slices['m']][0]), sim_dt)
         self.est_log = []
+
+    def set_obstacles(self, obstacles):
+        self.obstacles = np.asarray(obstacles, float)
+
+    def _obstacle_margin(self, state):
+        """Adaptive conformal (Gibbs & Candes 2021) quantile of the horizontal deviation between
+        the realised position and where the plan made `lag` steps ago predicted it."""
+        if not self.aci:
+            return self.obs_m
+        node_dt = self.T / self.N
+        lag = int(round(2 * node_dt / self.sim_dt))
+        if len(self.plans) and self.plans[0][0] <= self.step - lag:
+            while len(self.plans) > 1 and self.plans[1][0] <= self.step - lag:
+                self.plans.popleft()
+            k0, X = self.plans[0]
+            j = (self.step - k0) * self.sim_dt / node_dt
+            if j <= self.N:
+                jl = int(np.floor(j))
+                ju = min(jl + 1, self.N)
+                pred = X[jl, :2] + (j - jl) * (X[ju, :2] - X[jl, :2])
+                e = np.linalg.norm(np.asarray(state['x'][:2]) - pred)
+                miss = float(e > self.aci_q)
+                self.aci_q = max(0.0, self.aci_q + self.aci_gamma * (miss - self.aci_alpha))
+                self.aci_miss += miss
+                self.aci_n += 1
+        return self.obs_m + self.aci_q
 
     def update_trajectory(self, trajectory):
         self.trajectory = trajectory
@@ -261,6 +301,8 @@ class OracleNMPC(MultirotorControlTemplate):
             event = self.front.event
             q = state['q']
             self.x_fe = np.concatenate([state['x'], state['v'], [q[3], q[0], q[1], q[2]], state['w']])
+            if event == 'jump':
+                self.jbyp_left = self.jbyp
             if event == 'resume' or (event == 'jump' and self.jreset):
                 from icon_mpc.estimators import reset_kinematics
                 reset_kinematics(self.kf)
@@ -275,7 +317,11 @@ class OracleNMPC(MultirotorControlTemplate):
             params = self._stage_params(t, state)
             q = state['q']
             x0 = np.concatenate([state['x'], state['v'], [q[3], q[0], q[1], q[2]], state['w']])
-            if self.filt == 2 and getattr(self.kf, 'xf', None) is not None:
+            bypass = self.jbyp_left > 0
+            self.jbyp_left = max(0, self.jbyp_left - 1)
+            if bypass:
+                pass
+            elif self.filt == 2 and getattr(self.kf, 'xf', None) is not None:
                 # learned state filter: [p, v, w] + left attitude correction
                 x0[0:6], x0[10:13] = self.kf.xf[0:6], self.kf.xf[6:9]
                 if len(self.kf.xf) >= 12:
@@ -306,7 +352,14 @@ class OracleNMPC(MultirotorControlTemplate):
                     yref[k] = np.concatenate([xr, ur])
                 else:
                     yref_e = xr
+            if self.use_obs and self.obstacles is not None:
+                m = self._obstacle_margin(state)
+                ob = self.obstacles.copy()
+                ob[:, 2] = np.where(ob[:, 2] > 0, ob[:, 2] + m, 0.0)
+                self.mpc.obs = ob.reshape(-1)
             u, ts = self.mpc.solve(x0, yref, yref_e, params)
+            if self.use_obs and getattr(self.mpc, 'X_pred', None) is not None:
+                self.plans.append((self.step, self.mpc.X_pred.copy()))
             if np.all(np.isfinite(u)):
                 self.u = np.clip(u, 0, self.mpc.f_max)
             self.solve_times.append(ts)

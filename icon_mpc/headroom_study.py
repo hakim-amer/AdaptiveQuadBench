@@ -219,6 +219,13 @@ def run_task(task):
         controller = switch_controller(ctrl_name, cparams)
     os.chdir(REPO)
     controller.update_trajectory(traj)
+    obstacles = None
+    if spec.get('obstacles') == 'intrude':
+        obstacles = R.make_obstacles(traj, i, clear=(-0.10, -0.03), min_clear=None)
+    elif spec.get('obstacles'):
+        obstacles = R.make_obstacles(traj, i)
+    if obstacles is not None and hasattr(controller, 'set_obstacles'):
+        controller.set_obstacles(obstacles)
     if collect:
         controller.record = []
 
@@ -263,14 +270,18 @@ def run_task(task):
         res = env.run(t_final=T_FINAL, use_mocap=False, terminate=False, plot=False,
                       animate_bool=False, verbose=False)
         m = compute_metrics(res)
+        if obstacles is not None:
+            m.update(R.obstacle_metrics(res['state']['x'], obstacles))
     except Exception as e:  # diverged solver etc. -> count as failure
         m = {'rmse': np.inf, 'rmse_after1s': np.inf, 'max_err': np.inf, 'heading_deg': np.nan,
              'heading_wrapped_deg': np.nan, 'cmd_rate': np.nan, 'error': repr(e)[:200]}
+        if obstacles is not None:  # a crashed/diverged rollout counts as a collision
+            m.update(min_clear=-np.inf, collision=1.0, coll_frac=np.nan)
     faulthandler.cancel_dump_traceback_later()
     if collect:
         kicks = getattr(vehicle, 'kick_times', None)
         skip = ()
-        if kicks is not None:
+        if kicks is not None and not os.environ.get('ICON_KEEP_KICK_LABELS'):
             k_idx = np.searchsorted(np.asarray(res['time']), kicks)
             skip = {int(k) + d for k in k_idx for d in (-2, -1, 0, 1)}
         m['data'] = _training_data(controller, res, cparams, skip) if np.isfinite(m['rmse']) else None

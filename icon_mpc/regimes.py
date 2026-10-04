@@ -37,7 +37,18 @@ REGIMES = {
     'lat_rand': {'latency': 'random'},  # per-trial latency ~ U(0, 60 ms), unknown to the controller
     'combo': {'noise': 1.0, 'latency': 0.02, 'aggressive': True, 'rotor_fault': True},
     'mix': {'mix': True},
-    'mix2': {'mix': 2},  # mix + non-Gaussian noise / outliers / impulses / flicker faults; training only
+    'mix2': {'mix': 2},
+    # obstacle-avoidance safety scenarios: 4 vertical cylinders 4-12 cm from the reference
+    'obs': {'obstacles': True},
+    'obs_noise': {'obstacles': True, 'noise': 1.0},
+    'obs_flicker': {'obstacles': True, 'flicker': True},
+    'obs_stress': {'obstacles': True, 'noise': 1.0, 'outlier': 0.02, 'dropout': True, 'flicker': True},
+    # obstacles intrude 3-10 cm into the reference path: the reference itself is unsafe, so only a
+    # controller enforcing state constraints can avoid collisions
+    'obsx': {'obstacles': 'intrude'},
+    'obsx_noise': {'obstacles': 'intrude', 'noise': 1.0},
+    'obsx_flicker': {'obstacles': 'intrude', 'flicker': True},
+    'obsx_stress': {'obstacles': 'intrude', 'noise': 1.0, 'outlier': 0.02, 'dropout': True, 'flicker': True},  # mix + non-Gaussian noise / outliers / impulses / flicker faults; training only
     # non-Gaussian sensing / unmodelled events (stress tests; not used for training)
     'heavy': {'noise': 1.0, 'heavy': 2.5},           # Student-t (nu=2.5) instead of Gaussian noise
     'outlier': {'noise': 1.0, 'outlier': 0.02},      # 2 %/step per-channel glitches of 20 sigma
@@ -217,3 +228,43 @@ def wrap_latency(controller, delay, dt):
             buf.popleft()
         return buf[0]
     controller.update = delayed_update
+
+
+R_BODY = 0.10  # m, quadrotor footprint radius used for collision checking (obstacles are inflated by it)
+
+
+def make_obstacles(traj, i, n=4, t_final=5.0, dt=0.01, clear=(0.04, 0.12), min_clear=0.03, min_gap=0.15):
+    """n vertical cylinders (cx, cy, r_inflated) placed beside the reference: at a random time t_k
+    the reference passes at horizontal clearance c_k ~ U(clear) from the (inflated) surface, and
+    the whole reference keeps >= min_clear from every obstacle (min_clear=None: obstacles may intrude);
+    obstacles are >= min_gap apart so a margin never closes a passage. Returns an (n, 3) array."""
+    rng = np.random.default_rng(490000 + i)
+    ts = np.arange(0, t_final + dt / 2, dt)
+    P = np.array([traj.update(t)['x'][:2] for t in ts])
+    V = np.array([traj.update(t)['x_dot'][:2] for t in ts])
+    obs = []
+    for _ in range(3000):
+        if len(obs) == n:
+            break
+        k = int(rng.integers(int(0.8 / dt), len(ts) - int(0.3 / dt)))
+        v = V[k]
+        nrm = np.array([-v[1], v[0]]) / np.linalg.norm(v) if np.linalg.norm(v) > 0.05 else \
+            (lambda a: np.array([np.cos(a), np.sin(a)]))(rng.uniform(0, 2 * np.pi))
+        r = rng.uniform(0.1, 0.3) + R_BODY
+        c = rng.uniform(*clear)
+        ctr = P[k] + rng.choice([-1, 1]) * nrm * (r + c)
+        d = np.linalg.norm(P - ctr, axis=1) - r
+        if d[:int(0.8 / dt)].min() < 0.15:  # the start must be clearly outside every obstacle
+            continue
+        if (min_clear is not None and d.min() < min_clear) or any(np.linalg.norm(ctr - o[:2]) < r + o[2] + min_gap for o in obs):
+            continue
+        obs.append([ctr[0], ctr[1], r])
+    while len(obs) < n:  # pad with far-away dummies (never happens in practice)
+        obs.append([10.0, 10.0, 0.0])
+    return np.array(obs)
+
+
+def obstacle_metrics(pos, obs):
+    """pos: (T, 3) actual positions. Signed clearance to the inflated obstacles (m)."""
+    d = np.min(np.linalg.norm(pos[:, None, :2] - obs[None, :, :2], axis=-1) - obs[None, :, 2], axis=1)
+    return {'min_clear': float(d.min()), 'collision': float(d.min() < 0), 'coll_frac': float(np.mean(d < 0))}
