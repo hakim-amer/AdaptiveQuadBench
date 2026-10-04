@@ -161,6 +161,10 @@ def compute_metrics(res):
         'heading_deg': float(np.rad2deg(np.abs(dyaw).mean())),
         'heading_wrapped_deg': float(np.rad2deg(np.abs(wrapped).mean())),
         'cmd_rate': float(np.mean(np.abs(np.diff(u, axis=0))) / SIM_DT),
+        # safety: max tilt and fraction of time outside a 10 cm tube around the reference
+        'max_tilt_deg': float(np.rad2deg(np.arccos(np.clip(
+            Rotation.from_quat(res['state']['q']).as_matrix()[:, 2, 2], -1, 1))).max()),
+        'tube10_viol': float(np.mean(err > 0.10)),
     }
 
 
@@ -189,6 +193,10 @@ def run_task(task):
         wind_seq = R.apply_gust_front(wind_seq, i, SIM_DT, int((T_FINAL + 1.0) / SIM_DT) + 2)
     if spec.get('rotor_fault'):
         R.apply_rotor_fault(vehicle, i)
+    if spec.get('flicker'):
+        R.apply_flicker_fault(vehicle, i)
+    if spec.get('impulse'):
+        R.apply_impulses(vehicle, i)
     ext_f = c['ext_force'][i] if c['ext_force'] is not None else None
     ext_t = c['ext_torque'][i] if c['ext_torque'] is not None else None
     toggles = c['toggle_times'][i] if c['toggle_times'] is not None else None
@@ -221,7 +229,8 @@ def run_task(task):
     env.vehicle.initial_state = {'x': np.zeros(3), 'v': np.zeros(3), 'q': np.array([0, 0, 0, 1.]),
                                  'w': np.zeros(3), 'wind': np.zeros(3), 'rotor_speeds': np.zeros(4)}
     if spec.get('noise'):
-        R.wrap_sensor_noise(controller, i, spec['noise'])
+        R.wrap_sensor_noise(controller, i, spec['noise'], heavy=spec.get('heavy'),
+                            outlier=spec.get('outlier', 0.0), dropout=spec.get('dropout', False))
     if spec.get('latency'):
         R.wrap_latency(controller, R.latency_of(spec['latency'], i), SIM_DT)
     np.random.seed(i)
@@ -229,6 +238,7 @@ def run_task(task):
     import faulthandler
     faulthandler.dump_traceback_later(TASK_TIMEOUT_S - 20, exit=False)
     _update = controller.update
+    ctrl_times = []
 
     def guarded_update(*a, **kw):
         # Diverged rollouts make RK45 extremely stiff; abort them and count as failure.
@@ -236,7 +246,10 @@ def run_task(task):
             raise TimeoutError(f'rollout exceeded {ROLLOUT_TIMEOUT_S}s')
         if np.linalg.norm(a[1]['x'] - a[2]['x']) > DIVERGE_ERR_M:
             raise RuntimeError('diverged')
-        return _update(*a, **kw)
+        tc = time.perf_counter()
+        out = _update(*a, **kw)
+        ctrl_times.append(time.perf_counter() - tc)
+        return out
     controller.update = guarded_update
     _sdot = vehicle._s_dot_fn
 
@@ -258,7 +271,9 @@ def run_task(task):
         m['data'] = _training_data(controller, res, cparams) if np.isfinite(m['rmse']) else None
     m.update(regime=regime, experiment=experiment, controller=ctrl_name, trial=i, wall_s=time.time() - t0,
              solve_fail=getattr(getattr(controller, 'mpc', None), 'n_fail', np.nan),
-             solve_ms=float(np.mean(controller.solve_times) * 1e3) if getattr(controller, 'solve_times', None) else np.nan)
+             solve_ms=float(np.mean(controller.solve_times) * 1e3) if getattr(controller, 'solve_times', None) else np.nan,
+             ctrl_ms=float(np.mean(ctrl_times) * 1e3) if ctrl_times else np.nan,
+             ctrl_p99_ms=float(np.percentile(ctrl_times, 99) * 1e3) if ctrl_times else np.nan)
     return m
 
 

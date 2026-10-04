@@ -17,7 +17,7 @@ from scipy.spatial.transform import Rotation
 from controller.controller_template import MultirotorControlTemplate
 from icon_mpc.nmpc import ParamNMPCSolver, get_param_nmpc, LAYOUT, nominal_params, vehicle_params, GRAV
 
-LEVELS = ['nominal', 'aero', 'kf', 'mmae', 'learned', 'params', 'dist', 'future']  # levels >= 'params' are privileged
+LEVELS = ['nominal', 'aero', 'kf', 'mmae', 'learned', 'agg', 'params', 'dist', 'future']  # levels >= 'params' are privileged
 
 
 def flat_to_state_ref(flat, mass, thrust_gain_sum):
@@ -121,6 +121,12 @@ class OracleNMPC(MultirotorControlTemplate):
             self.delay_steps = int(round(delay / sim_dt))
             hist_len = self.delay_steps + 1
         self.filt = int(kf_kwargs.pop('filt', 0))
+        # gate=1: robust measurement front end (stale-packet + outlier rejection) before everything
+        self.front = None
+        self.jreset = int(kf_kwargs.pop('jreset', 0))
+        if int(kf_kwargs.pop('gate', 0)):
+            from icon_mpc.estimators import RobustFrontEnd
+            self.front = RobustFrontEnd(sim_dt)
         self.cmd_hist = deque(maxlen=hist_len)
         self._f = None
         if self.delay_steps or self.delay_id is not None:
@@ -149,6 +155,19 @@ class OracleNMPC(MultirotorControlTemplate):
             from icon_mpc.learned.estimator import LearnedEstimator
             self.kf = LearnedEstimator(self.p_nom, self.k_eta_ctrl, dt=sim_dt,
                                        tau_m=ctrl_params.get('tau_m'), **kf_kwargs)
+        elif level == 'agg':
+            # safe aggregation (G4): robust KF, fast KF and (optionally) the learned estimator
+            from icon_mpc.estimators import LumpedKF, SafeAggregator
+            tm = ctrl_params.get('tau_m')
+            experts = [LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, tau_m=tm,
+                                r_v=0.15, r_w=0.15, q_F=10, q_tau=0.1),
+                       LumpedKF(self.p_nom, self.k_eta_ctrl, dt=sim_dt, tau_m=tm,
+                                r_v=0.05, r_w=0.05, q_F=10, q_tau=0.1)]
+            if 'model' in kf_kwargs:
+                from icon_mpc.learned.estimator import LearnedEstimator
+                experts.append(LearnedEstimator(self.p_nom, self.k_eta_ctrl, dt=sim_dt, tau_m=tm,
+                                                model=kf_kwargs['model']))
+            self.kf = SafeAggregator(experts, float(self.p_nom[LAYOUT.slices['m']][0]), sim_dt)
         self.est_log = []
 
     def update_trajectory(self, trajectory):
@@ -159,7 +178,7 @@ class OracleNMPC(MultirotorControlTemplate):
         N = self.N
         if self.level in ('nominal', 'aero'):
             return np.tile(self.p_nom, (N + 1, 1))
-        if self.level in ('kf', 'mmae', 'learned'):
+        if self.level in ('kf', 'mmae', 'learned', 'agg'):
             p = self.p_nom.copy()
             p[LAYOUT.slices['F']], p[LAYOUT.slices['tau']] = self.kf.estimate()
             return np.tile(p, (N + 1, 1))
@@ -174,6 +193,19 @@ class OracleNMPC(MultirotorControlTemplate):
             p[LAYOUT.slices['tau']] = state.get('ext_torque', np.zeros(3))
             p[LAYOUT.slices['wind']] = state.get('wind', np.zeros(3))
         return np.tile(p, (N + 1, 1))
+
+    def _rk4(self, x, u, params):
+        if self._f is None:
+            from icon_mpc.nmpc import build_model
+            import casadi as cs
+            mdl = build_model('icon_pred_model')
+            self._f = cs.Function('f', [mdl.x, mdl.u, mdl.p], [mdl.f_expl_expr])
+        f = lambda xx: np.asarray(self._f(xx, u, params)).ravel()
+        h = self.sim_dt
+        k1 = f(x); k2 = f(x + h / 2 * k1); k3 = f(x + h / 2 * k2); k4 = f(x + h * k3)
+        x = x + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        x[6:10] /= np.linalg.norm(x[6:10])
+        return x
 
     def _predict(self, x, params):
         """RK4 roll-forward over the actuation delay with the commands already in the pipeline."""
@@ -195,10 +227,26 @@ class OracleNMPC(MultirotorControlTemplate):
             self.delay_log.append(self.delay_steps)
         applied = self.cmd_hist[max(-len(self.cmd_hist), -1 - self.delay_steps)] if self.cmd_hist else None
         omega_cmd_prev = np.sqrt(applied / self.k_eta_ctrl) if applied is not None else None
+        event = None
+        if self.front is not None:
+            pred = None
+            if getattr(self, 'x_fe', None) is not None and applied is not None:
+                # model-based gate: previous front-end state propagated with the NMPC model,
+                # the current disturbance estimate and the thrust actually applied
+                xp = self._rk4(self.x_fe, applied, self._stage_params(t, state)[0])
+                pred = {'x': xp[0:3], 'v': xp[3:6], 'q': xp[[7, 8, 9, 6]], 'w': xp[10:13]}
+            state = dict(state)
+            state.update(self.front.filter(state, pred))
+            event = self.front.event
+            q = state['q']
+            self.x_fe = np.concatenate([state['x'], state['v'], [q[3], q[0], q[1], q[2]], state['w']])
+            if event == 'resume' or (event == 'jump' and self.jreset):
+                from icon_mpc.estimators import reset_kinematics
+                reset_kinematics(self.kf)
         if self.record is not None:
             self.record.append(({k: np.array(state[k], float) for k in ('x', 'v', 'q', 'w', 'rotor_speeds')},
                                 omega_cmd_prev))
-        if self.kf is not None:
+        if self.kf is not None and event != 'stale':
             self.est_log.append(np.concatenate(self.kf.update(state, omega_cmd_prev)))
             if self.record is not None and getattr(self.kf, 'xf', None) is not None:
                 self.xf_log = getattr(self, 'xf_log', []) + [self.kf.xf.copy()]
@@ -214,6 +262,10 @@ class OracleNMPC(MultirotorControlTemplate):
                     x0[6:10] = [qf[3], qf[0], qf[1], qf[2]]
             elif self.filt and self.kf is not None:
                 x0[3:6], x0[10:13] = self.kf.z[0:3], self.kf.z[3:6]
+            if event == 'stale' and getattr(self, 'x_last', None) is not None:
+                # missing data: dead-reckon the last used state with the model + current estimate
+                x0 = self._rk4(self.x_last, applied if applied is not None else self.u, params[0])
+            self.x_last = x0.copy()
             t_ref = t
             if self.delay_steps:
                 x0 = self._predict(x0, params[0])

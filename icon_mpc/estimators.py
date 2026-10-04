@@ -8,6 +8,8 @@ drag, zero wind) driven by the *measured* rotor speeds, so whatever that model m
 which are modelled as random walks and passed to the NMPC exactly like the oracle's F / tau.
 """
 
+from collections import deque
+
 import numpy as np
 import casadi as cs
 
@@ -88,6 +90,7 @@ class LumpedKF:
         self.loglik = -0.5 * (nu @ Sinv @ nu + np.linalg.slogdet(S)[1])
         self.z = z_pred + K @ nu
         self.P = (np.eye(12) - K @ self.H) @ P_pred
+        self.a_model = xdot[3:6].copy()  # model translational accel (zero disturbance) at x_prev
         self.prev = (x, np.asarray(state['rotor_speeds'], float).copy())
         return self.estimate()
 
@@ -158,3 +161,193 @@ class MMAE:
         F = sum(w * kf.z[6:9] for w, kf in zip(self.w, self.kfs))
         tau = sum(w * kf.z[9:12] for w, kf in zip(self.w, self.kfs))
         return F, tau
+
+
+class RobustFrontEnd:
+    """Measurement front end in front of every estimator / the NMPC (no learning).
+
+    Sets .event each step:
+      'stale'  : packet bit-identical to the previous one (impossible with live sensor noise) ->
+                 missing data; estimators must skip their update and the NMPC dead-reckons;
+      'resume' : first fresh packet after a stale burst -> estimators re-initialise kinematics;
+      'jump'   : a genuine state jump (impact): two consecutive packets agree with each other but
+                 not with the prediction -> accepted after one step, estimators re-initialise
+                 kinematics instead of attributing the jump to a (huge) force;
+      None     : normal. Isolated innovations > k x running robust scale are rejected as outliers
+                 (constant-velocity / constant-rate prediction used instead).
+    """
+
+    FLOOR = {'x': 2e-3, 'v': 2e-2, 'att': 5e-3, 'w': 2e-2, 'rotor_speeds': 10.0}
+    KEY = {'x': 'x', 'v': 'v', 'att': 'q', 'w': 'w', 'rotor_speeds': 'rotor_speeds'}
+
+    def __init__(self, dt, k=6.0, warmup=20, max_rej=5, grace=10):
+        self.dt, self.k, self.warmup, self.max_rej, self.grace = dt, k, warmup, max_rej, grace
+        self.grace_left = 0
+        self.out = self.raw = None
+        self.scale = {g: 0.0 for g in self.FLOOR}
+        self.rej = {g: 0 for g in self.FLOOR}
+        self.last_rej = {g: None for g in self.FLOOR}
+        self.n, self.event, self.was_stale = 0, None, False
+        self.n_reject = self.n_stale = self.n_jump = 0
+
+    def _predict(self):
+        from scipy.spatial.transform import Rotation
+        o, dt = self.out, self.dt
+        return {'x': o['x'] + dt * o['v'], 'v': o['v'].copy(),
+                'q': (Rotation.from_quat(o['q']) * Rotation.from_rotvec(dt * o['w'])).as_quat(),
+                'w': o['w'].copy(), 'rotor_speeds': o['rotor_speeds'].copy()}
+
+    @staticmethod
+    def _dist(g, a, b):
+        from scipy.spatial.transform import Rotation
+        if g == 'att':
+            return np.linalg.norm((Rotation.from_quat(a) * Rotation.from_quat(b).inv()).as_rotvec())
+        return np.linalg.norm(a - b)
+
+    def filter(self, state, pred=None):
+        """pred: optional model-based one-step prediction {'x','v','q','w'} of the previous output."""
+        meas = {k: np.array(state[k], float) for k in ('x', 'v', 'q', 'w', 'rotor_speeds')}
+        self.event = None
+        if self.out is None:
+            self.out, self.raw = meas, meas
+            return dict(meas)
+        stale = all(np.array_equal(meas[k], self.raw[k]) for k in ('x', 'v', 'q', 'w'))
+        self.raw = meas
+        if stale:
+            self.n_stale += 1
+            self.event, self.was_stale = 'stale', True
+            self.out = dict(self._predict(), **(pred or {}))
+            return dict(self.out)
+        if self.was_stale:  # accept everything after a blackout
+            self.was_stale = False
+            self.event = 'resume'
+            self.out = meas
+            self.rej = {g: 0 for g in self.FLOOR}
+            return dict(meas)
+        self.n += 1
+        if self.grace_left > 0:  # post-jump transient: the predictor is not yet trustworthy
+            self.grace_left -= 1
+            self.out = meas
+            return dict(meas)
+        pred = dict(self._predict(), **(pred or {}))
+        out = {}
+        for g, mk in self.KEY.items():
+            r = self._dist(g, meas[mk], pred[mk])
+            thr = self.k * self.scale[g] + self.FLOOR[g]
+            if self.n > self.warmup and r > thr:
+                lr = self.last_rej[g]
+                if lr is not None:  # propagate the previously rejected packet one step with its own rates
+                    if g == 'x':
+                        lr = lr + self.dt * meas['v']
+                    elif g == 'att':
+                        from scipy.spatial.transform import Rotation
+                        lr = (Rotation.from_quat(lr) * Rotation.from_rotvec(self.dt * meas['w'])).as_quat()
+                consistent = lr is not None and self._dist(g, meas[mk], lr) < thr
+                if consistent or self.rej[g] >= self.max_rej:
+                    out[mk] = meas[mk]  # genuine jump
+                    if g in ('v', 'w', 'att', 'x'):
+                        self.event = 'jump'
+                    self.n_jump += 1
+                    self.rej[g], self.last_rej[g] = 0, None
+                else:
+                    out[mk] = pred[mk]
+                    self.rej[g] += 1
+                    self.last_rej[g] = meas[mk]
+                    self.n_reject += 1
+                continue
+            out[mk] = meas[mk]
+            self.rej[g], self.last_rej[g] = 0, None
+            self.scale[g] = (0.98 * self.scale[g] + 0.02 * r) if self.n > 1 else r
+        if self.event == 'jump':
+            self.grace_left = self.grace
+            self.rej = {g: 0 for g in self.FLOOR}
+            self.last_rej = {g: None for g in self.FLOOR}
+            out = meas  # accept the whole consistent packet
+        self.out = out
+        return dict(out)
+
+
+def reset_kinematics(est):
+    """Re-initialise an estimator's kinematic memory (after missing data or a state jump)
+    while keeping its disturbance estimate."""
+    if est is None:
+        return
+    if hasattr(est, 'experts'):
+        for e in est.experts:
+            reset_kinematics(e)
+        est.hist.clear()
+    if hasattr(est, 'kfs'):
+        for kf in est.kfs:
+            kf.prev = None
+    if hasattr(est, 'fe'):
+        reset_kinematics(est.fe)
+    if hasattr(est, 'prev'):
+        est.prev = None
+
+
+class SafeAggregator:
+    """Online exponentially-weighted aggregation of disturbance estimators (guarantee G4).
+
+    Experts predict the force disturbance *before* the data that scores them arrives. The score is
+    the observable low-frequency prediction loss of the position second difference over k steps
+    (a 2k-step triangular average of acceleration), which is unbiased for the expert's
+    low-frequency force error (the control-relevant part, guarantee G2) up to expert-independent
+    noise. Losses are Huber-clipped and exponentially forgotten (tracking the best expert in a
+    switching environment); eta is set scale-free from the running loss level.
+    """
+
+    def __init__(self, experts, mass, dt, k=20, forget=0.995, floor=0.02, huber=4.0):
+        self.experts, self.m, self.dt, self.k = experts, mass, dt, k
+        self.forget, self.floor, self.huber = forget, floor, huber
+        n = len(experts)
+        self.L = np.zeros(n)
+        self.w = np.full(n, 1.0 / n)
+        self.hist = deque(maxlen=2 * k + 1)  # (p_meas, a_model, [F_j/m])
+        self.lscale = None
+        tri = np.concatenate([np.arange(1, k + 1), np.arange(k - 1, 0, -1)]).astype(float)
+        self.tri = tri / tri.sum()
+        self.w_log = []
+
+    def update(self, state, omega_cmd_prev=None):
+        ests = [e.update(state, omega_cmd_prev) for e in self.experts]
+        base = self.experts[0]
+        a_model = getattr(base, 'a_model', None)
+        if a_model is None and hasattr(base, 'fe'):
+            a_model = getattr(base.fe.kfs[0], 'a_model', None)
+        # store predictions made with information up to the previous step
+        prevF = [np.asarray(getattr(e, '_lastF', est[0])) for e, est in zip(self.experts, ests)]
+        if a_model is not None:
+            self.hist.append((np.array(state['x'], float), a_model.copy(), [f / self.m for f in prevF]))
+        for e, est in zip(self.experts, ests):
+            e._lastF = np.asarray(est[0], float).copy()
+        if len(self.hist) == self.hist.maxlen:
+            p = [h[0] for h in self.hist]
+            a_meas = (p[-1] - 2 * p[self.k] + p[0]) / (self.k * self.dt) ** 2
+            # p_2k - 2 p_k + p_0 ~ dt^2 * sum of triangular-weighted (1..k..1) accelerations of the
+            # 2k-1 inner intervals; weights sum to k^2, so a_meas is their weighted mean
+            inner = list(self.hist)[1:-1]
+            am = np.array([h[1] for h in inner])
+            loss = np.empty(len(self.experts))
+            for j in range(len(self.experts)):
+                dj = np.array([h[2][j] for h in inner])
+                pred = self.tri @ (am + dj)
+                loss[j] = np.sum((a_meas - pred) ** 2)
+            lvl = np.min(loss)
+            self.lscale = lvl if self.lscale is None else 0.99 * self.lscale + 0.01 * lvl
+            c = self.huber * max(self.lscale, 1e-6)
+            loss = np.where(loss > c, 2 * np.sqrt(loss * c) - c, loss)
+            self.L = self.forget * self.L + loss
+            eta = 1.0 / (2.0 * max(self.lscale, 1e-6) * 10.0)
+            w = np.exp(-eta * (self.L - self.L.min()))
+            w = np.maximum(w / w.sum(), self.floor)
+            self.w = w / w.sum()
+        self.w_log.append(self.w.copy())
+        return self.estimate()
+
+    @property
+    def z(self):
+        return sum(w * e.z for w, e in zip(self.w, self.experts))
+
+    def estimate(self):
+        Fs, taus = zip(*[e.estimate() for e in self.experts])
+        return sum(w * f for w, f in zip(self.w, Fs)), sum(w * t for w, t in zip(self.w, taus))

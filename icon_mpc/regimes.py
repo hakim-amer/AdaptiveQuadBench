@@ -37,6 +37,14 @@ REGIMES = {
     'lat_rand': {'latency': 'random'},  # per-trial latency ~ U(0, 60 ms), unknown to the controller
     'combo': {'noise': 1.0, 'latency': 0.02, 'aggressive': True, 'rotor_fault': True},
     'mix': {'mix': True},
+    # non-Gaussian sensing / unmodelled events (stress tests; not used for training)
+    'heavy': {'noise': 1.0, 'heavy': 2.5},           # Student-t (nu=2.5) instead of Gaussian noise
+    'outlier': {'noise': 1.0, 'outlier': 0.02},      # 2 %/step per-channel glitches of 20 sigma
+    'dropout': {'noise': 1.0, 'dropout': True},      # mocap/IMU freezes (stale packets) of 50-200 ms
+    'impulse': {'impulse': True},                    # collision-like velocity / body-rate kicks
+    'flicker': {'flicker': True},                    # intermittent rotor fault (toggles on/off)
+    'stress': {'noise': 1.0, 'outlier': 0.02, 'dropout': True, 'impulse': True, 'flicker': True,
+               'aggressive': True},
 }
 
 
@@ -101,20 +109,83 @@ def apply_rotor_fault(vehicle, i):
     vehicle.step = faulty_step
 
 
-def wrap_sensor_noise(controller, i, scale):
+def wrap_sensor_noise(controller, i, scale, heavy=None, outlier=0.0, dropout=False):
+    """Sensor corruption. heavy: Student-t dof (unit-variance-scaled) instead of Gaussian;
+    outlier: per-step, per-channel-group probability of a 20-sigma glitch; dropout: bursts in
+    which the controller keeps receiving the last packet (stale, bit-identical measurements)."""
     rng = np.random.default_rng(300000 + i)
     s = {k: v * scale for k, v in NOISE.items()}
     inner = controller.update
+    held = {'left': 0, 'st': None}
+
+    def draw(sd, n):
+        if heavy:
+            e = rng.standard_t(heavy, n) * np.sqrt((heavy - 2) / heavy)
+        else:
+            e = rng.normal(0, 1, n)
+        if outlier and rng.random() < outlier:
+            e = e + rng.normal(0, 20, n)
+        return sd * e
 
     def noisy_update(t, state, flat):
+        if dropout:
+            if held['left'] > 0 and held['st'] is not None:
+                held['left'] -= 1
+                return inner(t, held['st'], flat)
+            if t > 0.5 and rng.random() < 0.01:
+                held['left'] = int(rng.integers(5, 21))
         st = dict(state)
-        st['x'] = state['x'] + rng.normal(0, s['p'], 3)
-        st['v'] = state['v'] + rng.normal(0, s['v'], 3)
-        st['q'] = (Rotation.from_rotvec(rng.normal(0, s['att'], 3)) * Rotation.from_quat(state['q'])).as_quat()
-        st['w'] = state['w'] + rng.normal(0, s['w'], 3)
-        st['rotor_speeds'] = state['rotor_speeds'] + rng.normal(0, s['rpm'], len(state['rotor_speeds']))
+        st['x'] = state['x'] + draw(s['p'], 3)
+        st['v'] = state['v'] + draw(s['v'], 3)
+        st['q'] = (Rotation.from_rotvec(draw(s['att'], 3)) * Rotation.from_quat(state['q'])).as_quat()
+        st['w'] = state['w'] + draw(s['w'], 3)
+        st['rotor_speeds'] = state['rotor_speeds'] + draw(s['rpm'], len(state['rotor_speeds']))
+        held['st'] = st
         return inner(t, st, flat)
     controller.update = noisy_update
+
+
+def apply_impulses(vehicle, i):
+    """Collision-like kicks: 3 instantaneous velocity (0.5-1.5 m/s) and body-rate (2-5 rad/s) jumps."""
+    rng = np.random.default_rng(450000 + i)
+    kicks = sorted(rng.uniform(1.0, 4.5, 3))
+    dv = [rng.uniform(0.5, 1.5) * (lambda d: d / np.linalg.norm(d))(rng.normal(size=3)) for _ in kicks]
+    dw = [rng.uniform(2, 5) * (lambda d: d / np.linalg.norm(d))(rng.normal(size=3)) for _ in kicks]
+    step, clock = vehicle.step, {'t': 0.0, 'k': 0}
+
+    def kicked_step(state, control, t_step):
+        out = step(state, control, t_step)
+        clock['t'] += t_step
+        k = clock['k']
+        if k < len(kicks) and clock['t'] >= kicks[k]:
+            out = dict(out)
+            out['v'] = out['v'] + dv[k]
+            out['w'] = out['w'] + dw[k]
+            clock['k'] += 1
+        return out
+    vehicle.step = kicked_step
+
+
+def apply_flicker_fault(vehicle, i):
+    """Intermittent rotor fault: one rotor toggles between healthy and 30-60 % effectiveness
+    every 0.2-0.8 s after a random onset (loose connector / ESC brown-out)."""
+    f = fault_spec(i)
+    rng = np.random.default_rng(470000 + i)
+    toggles = np.cumsum(np.concatenate([[f['t'] - 0.5], rng.uniform(0.2, 0.8, 30)]))
+    step, clock = vehicle.step, {'t': 0.0, 'k': 0}
+    healthy = np.array(vehicle.rotor_efficiency, dtype=float).copy()
+
+    def flick_step(state, control, t_step):
+        while clock['k'] < len(toggles) and clock['t'] >= toggles[clock['k']]:
+            clock['k'] += 1
+            eff = healthy.copy()
+            if clock['k'] % 2 == 1:
+                eff[f['rotor']] *= f['eff']
+            vehicle.rotor_efficiency = eff
+        out = step(state, control, t_step)
+        clock['t'] += t_step
+        return out
+    vehicle.step = flick_step
 
 
 def latency_of(spec_latency, i):

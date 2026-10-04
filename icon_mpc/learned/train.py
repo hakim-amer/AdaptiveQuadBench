@@ -47,6 +47,9 @@ def build_model(cfg):
         from icon_mpc.models.gain import GainNet
         return GainNet(cfg['d_in'], cfg['d_out'], cfg['d_model'], cfg['n_layers'], cfg['d_state'],
                        mix=cfg['arch'] == 'gain')
+    if cfg['arch'] == 'gdn':
+        from icon_mpc.models.gated_delta import GatedDeltaStack
+        return GatedDeltaStack(cfg['d_in'], cfg['d_out'], cfg['d_model'], cfg['n_layers'])
     if cfg['arch'] == 'gru':
         return GRUNet(cfg['d_in'], cfg['d_out'], cfg['d_model'], cfg['n_layers'])
     return MambaStack(cfg['d_in'], cfg['d_out'], cfg['d_model'], cfg['n_layers'], cfg['d_state'],
@@ -72,7 +75,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data', nargs='+', required=True)
     ap.add_argument('--name', required=True)
-    ap.add_argument('--arch', default='mamba', choices=['mamba', 'lti', 'gru', 'gain', 'gain_nomix'])
+    ap.add_argument('--arch', default='mamba', choices=['mamba', 'lti', 'gru', 'gain', 'gain_nomix', 'gdn'])
     ap.add_argument('--d_model', type=int, default=64)
     ap.add_argument('--n_layers', type=int, default=2)
     ap.add_argument('--d_state', type=int, default=16)
